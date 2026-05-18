@@ -1,0 +1,11 @@
+*.txt
+*.md
+.env
+node_modules
+dist
+build
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+.vscode/

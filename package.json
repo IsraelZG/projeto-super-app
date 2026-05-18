@@ -1,0 +1,21 @@
+{
+  "name": "superapp-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Superapp Monorepo",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "ignore": "^7.0.5",
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
+  }
+}
