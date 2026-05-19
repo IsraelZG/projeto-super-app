@@ -11,3 +11,4 @@ build
 .vscode/
 c:\Dev2026\Design System\generate_project_summary.js
 !docs/**/*.md
+!.specify/**/*.md
