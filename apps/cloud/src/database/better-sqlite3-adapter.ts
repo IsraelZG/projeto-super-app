@@ -13,7 +13,12 @@ export class BetterSQLite3Adapter implements DatabaseAdapter {
   }
 
   public async query(sql: string, params: any[] = []): Promise<any[][]> {
-    return this.db.prepare(sql).raw().all(params) as any[][];
+    const stmt = this.db.prepare(sql);
+    if (stmt.reader) {
+      return stmt.raw().all(params) as any[][];
+    }
+    stmt.run(params);
+    return [];
   }
 
   public async close(): Promise<void> {

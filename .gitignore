@@ -9,3 +9,5 @@ build
 *.sqlite-shm
 *.sqlite-wal
 .vscode/
+c:\Dev2026\Design System\generate_project_summary.js
+!docs/**/*.md
