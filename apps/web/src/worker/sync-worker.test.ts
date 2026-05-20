@@ -180,4 +180,154 @@ describe('Sync Worker & CQRS Triggers', () => {
     expect(edgeRows.length).toBe(1);
     expect(edgeRows[0][0]).toBe(edgeId); // Column 0 is id
   });
+
+  it('MFA-S: deve gravar no staging, realizar coalescência semântica e gerar logs de auditoria', async () => {
+    const docId = ulid();
+    
+    // Simulate keyboard typing
+    await workerApi.saveStagingEntry({
+      document_id: docId,
+      path: 'title',
+      userId: 'user_1',
+      value: 'T'
+    });
+    await workerApi.saveStagingEntry({
+      document_id: docId,
+      path: 'title',
+      userId: 'user_1',
+      value: 'Te'
+    });
+    await workerApi.saveStagingEntry({
+      document_id: docId,
+      path: 'title',
+      userId: 'user_1',
+      value: 'Test'
+    });
+
+    // Check that there are 3 entries in staging
+    const stagingRows = await workerApi.query('SELECT * FROM pending_staging WHERE document_id = ?', [docId]);
+    expect(stagingRows.length).toBe(3);
+
+    // Run semantic compiler/coalescence
+    await workerApi.runCoalescence();
+
+    // Verify pending_staging is cleared for this document
+    const stagingRowsAfter = await workerApi.query('SELECT * FROM pending_staging WHERE document_id = ?', [docId]);
+    expect(stagingRowsAfter.length).toBe(0);
+
+    // Verify a CONTENT:AUDIT node was created
+    const auditNodes = await workerApi.query("SELECT payload FROM nodes WHERE entity_id = ? AND type = 'CONTENT:AUDIT'", [docId]);
+    expect(auditNodes.length).toBe(1);
+
+    const payloadRaw = auditNodes[0][0];
+    const parsed = typeof payloadRaw === 'string'
+      ? JSON.parse(payloadRaw)
+      : JSON.parse(new TextDecoder().decode(payloadRaw));
+
+    expect(parsed.path).toBe('title');
+    expect(parsed.before_value).toBeNull();
+    expect(parsed.after_value).toBe('Test');
+    expect(parsed.userId).toBe('user_1');
+  });
+
+  it('MFA-S: deve rodar a coalescência de recuperação no startup', async () => {
+    const docId = ulid();
+
+    // Terminate worker to make sure database locks are clean
+    worker.terminate();
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Start worker, init
+    worker = new Worker(new URL('./sync-worker.ts', import.meta.url), { type: 'module' });
+    workerApi = Comlink.wrap<typeof SyncWorkerAPI>(worker);
+    await workerApi.init('sync_test_recovery.sqlite');
+
+    // Clear old data
+    await workerApi.exec('DELETE FROM pending_staging');
+    await workerApi.exec('DELETE FROM nodes');
+
+    // Insert directly to pending_staging, simulating residual offline data from a crashed session
+    const id1 = ulid();
+    const id2 = ulid();
+    await workerApi.query(
+      `INSERT INTO pending_staging (id, document_id, path, userId, value, created_at) 
+       VALUES (?, ?, 'name', 'user_crash', 'Israel', ?)`,
+      [id1, docId, Date.now() - 1000]
+    );
+    await workerApi.query(
+      `INSERT INTO pending_staging (id, document_id, path, userId, value, created_at) 
+       VALUES (?, ?, 'name', 'user_crash', 'Israel Z', ?)`,
+      [id2, docId, Date.now()]
+    );
+
+    // Terminate worker (simulating crash / reload)
+    worker.terminate();
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Reload worker - initialization should automatically run coalescence!
+    worker = new Worker(new URL('./sync-worker.ts', import.meta.url), { type: 'module' });
+    workerApi = Comlink.wrap<typeof SyncWorkerAPI>(worker);
+    await workerApi.init('sync_test_recovery.sqlite');
+
+    // Wait a brief moment for the startup coalescence to finish
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Verify pending_staging is empty
+    const stagingCount = await workerApi.query('SELECT COUNT(*) FROM pending_staging');
+    expect(stagingCount[0][0]).toBe(0);
+
+    // Verify the CONTENT:AUDIT node exists
+    const auditNodes = await workerApi.query("SELECT payload FROM nodes WHERE entity_id = ? AND type = 'CONTENT:AUDIT'", [docId]);
+    expect(auditNodes.length).toBe(1);
+    
+    const payloadRaw = auditNodes[0][0];
+    const parsed = typeof payloadRaw === 'string'
+      ? JSON.parse(payloadRaw)
+      : JSON.parse(new TextDecoder().decode(payloadRaw));
+
+    expect(parsed.path).toBe('name');
+    expect(parsed.before_value).toBeNull();
+    expect(parsed.after_value).toBe('Israel Z');
+  });
+
+  it('MFA-S: deve persistir delta updates do Y.js e compactar em snapshots', async () => {
+    // Isolated database
+    worker.terminate();
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    worker = new Worker(new URL('./sync-worker.ts', import.meta.url), { type: 'module' });
+    workerApi = Comlink.wrap<typeof SyncWorkerAPI>(worker);
+    await workerApi.init('sync_test_yjs_persist.sqlite');
+
+    await workerApi.exec('DELETE FROM yjs_updates');
+    await workerApi.exec('DELETE FROM snapshots');
+
+    // Create a node to generate a Y.js update
+    const nodeId = ulid();
+    await workerApi.injectAndBroadcastNode({
+      id: nodeId,
+      entity_id: ulid(),
+      type: 'CONTENT:TEST',
+      epoch: 1,
+      created_at: Date.now()
+    });
+
+    // Wait a moment for Y.js update event to propagate and save
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // Assert that updates were recorded in yjs_updates
+    const updates = await workerApi.query('SELECT COUNT(*) FROM yjs_updates');
+    expect(updates[0][0]).toBeGreaterThanOrEqual(1);
+
+    // Trigger compaction snapshot manually
+    await workerApi.compactSnapshot('global-room');
+
+    // Assert that snapshots table has a row
+    const snapshotCount = await workerApi.query('SELECT COUNT(*) FROM snapshots WHERE room_id = ?', ['global-room']);
+    expect(snapshotCount[0][0]).toBe(1);
+
+    // Assert that yjs_updates is now cleared
+    const updatesAfter = await workerApi.query('SELECT COUNT(*) FROM yjs_updates');
+    expect(updatesAfter[0][0]).toBe(0);
+  });
 });

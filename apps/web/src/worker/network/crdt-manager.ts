@@ -13,9 +13,11 @@ export class CRDTManager {
   private docs: Map<string, Y.Doc> = new Map();
   private onRemoteData: RemoteDataCallback | null = null;
   private network: NetworkBridge;
+  private persistence: any;
 
-  constructor(network: NetworkBridge) {
+  constructor(network: NetworkBridge, persistence?: any) {
     this.network = network;
+    this.persistence = persistence || null;
     this.network.setOnMessage((peerId, topic, message) => {
       this.handleIncomingMessage(peerId, topic, message);
     });
@@ -37,13 +39,29 @@ export class CRDTManager {
       this.docs.set(topic, doc);
       
       // When local map changes, encode and broadcast
+      let sessionUpdatesCount = 0;
       doc.on('update', (update: Uint8Array, origin: any) => {
+        if (origin === 'load-origin') return;
+
         if (origin !== this) {
           // It was a local mutation, broadcast it!
           const packet = new Uint8Array(1 + update.length);
           packet[0] = 0; // type 0 = update
           packet.set(update, 1);
           this.network.broadcast(topic, packet);
+        }
+
+        if (this.persistence) {
+          this.persistence.saveUpdate(topic, update).catch((err: any) => {
+            console.error('CRDT: Failed to save update:', err);
+          });
+          sessionUpdatesCount++;
+          if (sessionUpdatesCount >= 50) {
+            sessionUpdatesCount = 0;
+            this.compactSnapshot(topic).catch((err: any) => {
+              console.error('CRDT: Compaction failed:', err);
+            });
+          }
         }
       });
 
@@ -82,6 +100,12 @@ export class CRDTManager {
           }
         }
       });
+
+      if (this.persistence) {
+        this.loadPersistedState(topic).catch((err) => {
+          console.error('CRDT: Failed to load persisted state:', err);
+        });
+      }
       
       this.network.joinTopic(topic);
     }
@@ -159,6 +183,42 @@ export class CRDTManager {
         packet.set(update, 1);
         this.network.broadcast(topic, packet); 
       }
+    }
+  }
+
+  private async loadPersistedState(topic: string) {
+    const doc = this.docs.get(topic);
+    if (!doc) return;
+
+    try {
+      const snapshot = await this.persistence.loadSnapshot(topic);
+      if (snapshot && snapshot.bin) {
+        Y.applyUpdate(doc, snapshot.bin, 'load-origin');
+      }
+
+      const updates = await this.persistence.loadUpdates(topic);
+      for (const update of updates) {
+        Y.applyUpdate(doc, update, 'load-origin');
+      }
+      console.log(`CRDT: Successfully loaded state for room ${topic} from database.`);
+    } catch (err) {
+      console.error(`CRDT: Failed to load state for room ${topic}:`, err);
+    }
+  }
+
+  public async compactSnapshot(topic: string) {
+    const doc = this.docs.get(topic);
+    if (!doc) return;
+
+    try {
+      const state = Y.encodeStateAsUpdate(doc);
+      const sv = Y.encodeStateVector(doc);
+      
+      await this.persistence.saveSnapshot(topic, state, sv);
+      await this.persistence.clearUpdates(topic);
+      console.log(`CRDT: Compacted snapshot for room ${topic}`);
+    } catch (err) {
+      console.error(`CRDT: Failed to compact snapshot for room ${topic}:`, err);
     }
   }
 }

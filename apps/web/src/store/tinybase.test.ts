@@ -23,6 +23,18 @@ describe('TinyBase Integration (Phase 4)', () => {
   afterAll(() => {
     worker.terminate();
   });
+  
+  async function waitForTableRecord(store: any, tableName: string, recordId: string, timeout = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const table = store.getTable(tableName);
+      if (table && table[recordId] !== undefined) {
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(`Timeout waiting for record ${recordId} in table ${tableName}`);
+  }
 
   it('should load initial state into TinyBase', async () => {
     const { store, persister } = createSuperAppStore(workerApi);
@@ -30,18 +42,64 @@ describe('TinyBase Integration (Phase 4)', () => {
     expect(store.getTable('entity_heads')).toEqual({});
   });
 
-  it('should react to worker mutations automatically', async () => {
+  it('should react to worker mutations and load pending intents automatically', async () => {
     const { store, persister } = createSuperAppStore(workerApi);
+    await persister.startAutoLoad();
 
-    const entity_id = ulid();
-    const node_id = ulid();
+    const intentId = ulid();
+    const entityId = ulid();
     
-    // Simulate what the persister would do when notified
-    store.setRow('entity_heads', entity_id, { node_id });
+    await workerApi.saveIntent({
+      id: intentId,
+      entity_id: entityId,
+      type: 'CONTENT:PURCHASE_ORDER',
+      payload: JSON.stringify({ price: 100 }),
+      created_at: Date.now(),
+      status: 'pending'
+    });
 
-    const table = store.getTable('entity_heads');
-    expect(table[entity_id]).toBeDefined();
-    expect(table[entity_id].node_id).toBe(node_id);
+    // Wait until the record is synced
+    await waitForTableRecord(store, 'pending_intents', intentId);
+
+    const table = store.getTable('pending_intents');
+    expect(table[intentId]).toBeDefined();
+    expect(table[intentId].entity_id).toBe(entityId);
+    expect(table[intentId].type).toBe('CONTENT:PURCHASE_ORDER');
+    
+    persister.destroy();
+  });
+
+  it('should react to worker mutations and load audit logs automatically', async () => {
+    const { store, persister } = createSuperAppStore(workerApi);
+    await persister.startAutoLoad();
+
+    const logId = ulid();
+    const docId = ulid();
+    
+    await workerApi.saveAuditLog({
+      id: logId,
+      document_id: docId,
+      path: 'status',
+      userId: 'user_1',
+      before_value: 'draft',
+      after_value: 'submitted',
+      vector_clock: '{}',
+      created_at: Date.now(),
+      status: 'active'
+    });
+
+    // Wait until the record is synced
+    await waitForTableRecord(store, 'audit_logs', logId);
+
+    const table = store.getTable('audit_logs');
+    expect(table[logId]).toBeDefined();
+    expect(table[logId].document_id).toBe(docId);
+    expect(table[logId].after_value).toBe('submitted');
+
+    // Verify that the audit log is stored physically in the nodes table (append-only)
+    const nodeRows = await workerApi.query('SELECT * FROM nodes WHERE id = ?', [logId]);
+    expect(nodeRows.length).toBe(1);
+    expect(nodeRows[0][2]).toBe('CONTENT:AUDIT'); // column 2 is type
     
     persister.destroy();
   });

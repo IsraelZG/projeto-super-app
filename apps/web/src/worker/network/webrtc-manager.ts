@@ -75,6 +75,10 @@ export class WebRTCManager {
         data.peers.forEach((p: any) => {
           if (p.peerName) this.peerNames.set(p.peerId, p.peerName);
         });
+        
+        if (this.onConnectionHandler) {
+          this.onConnectionHandler('cloud-peer');
+        }
       }
       else if (data.type === 'WEBRTC_MESSAGE') {
         logger.debug('WebRTC', `WEBRTC_MESSAGE received from ${data.senderId}: ${data.payload.type}`);

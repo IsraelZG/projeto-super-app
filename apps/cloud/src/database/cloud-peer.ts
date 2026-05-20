@@ -32,10 +32,37 @@ export class CloudPeer {
 
     const doc = this.getOrCreateRoomDoc(topic);
     
-    // Hydrate from SQLite cold storage
+    // Hydrate from SQLite cold storage with room-specific filters (selective replication)
     try {
-      const nodeRows = await this.db.query('SELECT * FROM nodes');
-      const edgeRows = await this.db.query('SELECT * FROM edges');
+      let nodeRows: any[][] = [];
+      let edgeRows: any[][] = [];
+
+      if (topic === 'global-room') {
+        // Sala pública: desconsidera nós de autenticação privados
+        nodeRows = await this.db.query("SELECT * FROM nodes WHERE type != 'PROFILE:AUTHENTICATION'");
+        edgeRows = await this.db.query(`
+          SELECT e.* FROM edges e 
+          JOIN nodes s ON e.source_id = s.id 
+          JOIN nodes t ON e.target_id = t.id 
+          WHERE s.type != 'PROFILE:AUTHENTICATION' AND t.type != 'PROFILE:AUTHENTICATION'
+        `);
+      } else if (topic.startsWith('auth-room:')) {
+        const hash = topic.substring('auth-room:'.length);
+        // Sala de autenticação privada de um usuário: carrega apenas as credenciais dele
+        nodeRows = await this.db.query("SELECT * FROM nodes WHERE type = 'PROFILE:AUTHENTICATION' AND entity_id = ?", [hash]);
+        edgeRows = await this.db.query(`
+          SELECT e.* FROM edges e 
+          JOIN nodes s ON e.source_id = s.id 
+          JOIN nodes t ON e.target_id = t.id 
+          WHERE (s.type = 'PROFILE:AUTHENTICATION' AND s.entity_id = ?) 
+             OR (t.type = 'PROFILE:AUTHENTICATION' AND t.entity_id = ?)
+        `, [hash, hash]);
+      } else {
+        // Outros tópicos (reserva futura)
+        nodeRows = await this.db.query('SELECT * FROM nodes');
+        edgeRows = await this.db.query('SELECT * FROM edges');
+      }
+
       const existingNodes = nodeRows.map(mapNodeRowToObject);
       const existingEdges = edgeRows.map(mapEdgeRowToObject);
 

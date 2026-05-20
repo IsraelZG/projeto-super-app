@@ -12,6 +12,7 @@ export default defineConfig({
     include: ['yjs'],
   },
   server: {
+    port: 5180,
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',

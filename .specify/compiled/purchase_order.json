@@ -1,0 +1,86 @@
+{
+  "meta": {
+    "id": "SPECIFICATION:PURCHASE_ORDER",
+    "type": "SPECIFICATION",
+    "name": "Purchase Order",
+    "version": "1.0.0",
+    "description": "Especificação de validação, segurança e estados para ordens de compra na plataforma."
+  },
+  "schema": {
+    "fields": {
+      "id": {
+        "type": "ulid",
+        "required": true
+      },
+      "buyer_id": {
+        "type": "ulid",
+        "required": true
+      },
+      "seller_id": {
+        "type": "ulid",
+        "required": true
+      },
+      "total_amount": {
+        "type": "number",
+        "required": true
+      },
+      "status": {
+        "type": "string",
+        "required": true
+      }
+    }
+  },
+  "security": {
+    "roles": [
+      "buyer",
+      "seller",
+      "validator"
+    ],
+    "requiredCapabilities": [
+      "purchase-order:create",
+      "purchase-order:approve",
+      "purchase-order:reject"
+    ]
+  },
+  "validation": {
+    "mode": "single_validator"
+  },
+  "stateMachine": {
+    "initial": "draft",
+    "states": {
+      "draft": {
+        "on": {
+          "SUBMIT": "submitted"
+        }
+      },
+      "submitted": {
+        "on": {
+          "APPROVE": "approved",
+          "REJECT": "rejected"
+        }
+      },
+      "approved": {
+        "on": {
+          "COMPLETE": "completed"
+        }
+      },
+      "rejected": {},
+      "completed": {}
+    }
+  },
+  "ui_hints": {
+    "super_card": {
+      "header": {
+        "title_field": "id",
+        "subtitle_field": "status"
+      },
+      "body": {
+        "primary_fields": [
+          "buyer_id",
+          "seller_id",
+          "total_amount"
+        ]
+      }
+    }
+  }
+}
