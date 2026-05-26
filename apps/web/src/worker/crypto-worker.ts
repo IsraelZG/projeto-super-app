@@ -4,11 +4,10 @@ import {
   validateMnemonic,
   deriveKeyPairFromMnemonic,
   encryptSecret,
-  decryptSecret,
-  toBase64,
-  fromBase64
-} from '@superapp/core';
-import { splitSecret, combineSecrets } from '@superapp/core';
+  decryptSecret
+} from '@superapp/core/src/security/identity.js';
+import { splitSecret, combineSecrets } from '@superapp/core/src/security/sss.js';
+import { toBase64, fromBase64 } from '@superapp/core/src/security/utils.js';
 
 export const CryptoWorkerAPI = {
   async generateMnemonic(strength: 128 | 256 = 128): Promise<string> {

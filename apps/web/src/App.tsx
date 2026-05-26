@@ -60,6 +60,8 @@ export function App() {
   const [restorePassword, setRestorePassword] = useState('');
   const [restoreProgressMsg, setRestoreProgressMsg] = useState('');
   const [isRestoring, setIsRestoring] = useState(false);
+  const [isCloudBackupPending, setIsCloudBackupPending] = useState(false);
+  const [isCloudRestorePending, setIsCloudRestorePending] = useState(false);
   
   // Active Sync States
   const [activePeerName, setActivePeerName] = useState<string | null>(null);
@@ -97,6 +99,105 @@ export function App() {
       })();
     }
   }, [isReady, workerApi, localIdentity]);
+
+  // Efeito para processar backup em nuvem pendente
+  useEffect(() => {
+    if (!isReady || !workerApi || !isCloudBackupPending || !cryptoApi) return;
+    
+    (async () => {
+      try {
+        setRestoreProgressMsg('Registrando nó de autenticação seguro...');
+        
+        const keys = await cryptoApi.deriveKeyPair(mnemonicText);
+        const hashId = await hashPublicKey(keys.publicKey);
+        const encryptedMnemonicObj = await cryptoApi.encryptSecret(mnemonicText, masterPassword);
+        
+        // Configurar chaves no worker
+        await workerApi.setSessionKeys(keys.privateKey, 1);
+        await workerApi.joinAuthRoom(hashId);
+
+        // Injetar nó PROFILE:AUTHENTICATION
+        const authNodeData = {
+          id: ulid(),
+          entity_id: hashId,
+          type: 'PROFILE:AUTHENTICATION',
+          epoch: 1,
+          created_at: Date.now(),
+          payload: JSON.stringify(encryptedMnemonicObj),
+          retention_state: 'integral'
+        };
+
+        await workerApi.injectAndBroadcastNode(authNodeData);
+        
+        setRestoreProgressMsg('Sincronização concluída com sucesso!');
+        setIsCloudBackupPending(false);
+        setIsRestoring(false);
+        
+        // Salvar credenciais locais
+        await saveIdentityAndStart(mnemonicText, keys.privateKey, keys.publicKey, hashId);
+      } catch (err: any) {
+        setIsCloudBackupPending(false);
+        setIsRestoring(false);
+        setErrorMessage(err.message || 'Falha ao sincronizar custódia.');
+      }
+    })();
+  }, [isReady, workerApi, isCloudBackupPending, cryptoApi, mnemonicText, masterPassword]);
+
+  // Efeito para processar restore em nuvem pendente
+  useEffect(() => {
+    if (!isReady || !workerApi || !isCloudRestorePending || !cryptoApi) return;
+
+    (async () => {
+      try {
+        setRestoreProgressMsg('Iniciando handshake e baixando sala auth-room...');
+        
+        // Entrar na sala restrita
+        await workerApi.joinAuthRoom(restoreIdentityHash.trim());
+
+        setRestoreProgressMsg('Aguardando sincronização de custódia (Zero-Knowledge)...');
+        
+        // Polling local para ver se o nó de autenticação privado chega via P2P
+        let nodeRow: any = null;
+        let pollCount = 0;
+        while (pollCount < 20) {
+          const rows = await workerApi.query(
+            "SELECT payload FROM nodes WHERE type = 'PROFILE:AUTHENTICATION' LIMIT 1"
+          );
+          if (rows.length > 0) {
+            nodeRow = rows[0];
+            break;
+          }
+          await new Promise(r => setTimeout(r, 1000));
+          pollCount++;
+        }
+
+        if (!nodeRow) {
+          throw new Error("O servidor ou par de custódia não respondeu. Certifique-se de que o ID está correto e que o servidor está conectado.");
+        }
+
+        setRestoreProgressMsg('Chave criptografada encontrada! Descriptografando...');
+
+        // Descriptografar payload
+        const encryptedSecretObj = JSON.parse(nodeRow[0]);
+        const decryptedMnemonic = await cryptoApi.decryptSecret(encryptedSecretObj, restorePassword);
+        
+        setRestoreProgressMsg('Chave mestra verificada! Inicializando ambiente...');
+
+        // Configurar chaves e salvar
+        const keys = await cryptoApi.deriveKeyPair(decryptedMnemonic);
+        
+        setIsCloudRestorePending(false);
+        setIsRestoring(false);
+        
+        await saveIdentityAndStart(decryptedMnemonic, keys.privateKey, keys.publicKey, restoreIdentityHash.trim());
+      } catch (err: any) {
+        setIsCloudRestorePending(false);
+        setIsRestoring(false);
+        setActivePeerName(null);
+        setErrorMessage(err.message || 'Erro na recuperação em nuvem. Verifique a senha.');
+      }
+    })();
+  }, [isReady, workerApi, isCloudRestorePending, cryptoApi, restoreIdentityHash, restorePassword]);
 
   // Copiar mnemônico individualmente
   const handleCopyWord = (word: string, index: number) => {
@@ -269,58 +370,11 @@ export function App() {
     }
     setErrorMessage('');
     setIsRestoring(true);
-    setRestoreProgressMsg('Criptografando chaves locally...');
+    setRestoreProgressMsg('Inicializando worker de sincronização...');
     
-    try {
-      const keys = await cryptoApi.deriveKeyPair(mnemonicText);
-      const hashId = await hashPublicKey(keys.publicKey);
-      
-      // 1. Cifrar mnemônico com a senha mestra
-      const encryptedMnemonicObj = await cryptoApi.encryptSecret(mnemonicText, masterPassword);
-      
-      // 2. Temporariamente setar o peerName para inicializar o worker e criar o node
-      setActivePeerName(peerNameInput.trim());
-      
-      // Aguardar o workerApi estar disponível
-      let checks = 0;
-      while (!(window as any).workerApi && checks < 30) {
-        await new Promise(r => setTimeout(r, 200));
-        checks++;
-      }
-      
-      const api = (window as any).workerApi;
-      if (!api) {
-        throw new Error("Worker de sincronização não iniciou a tempo.");
-      }
-
-      setRestoreProgressMsg('Registrando nó de autenticação seguro...');
-      
-      // 3. Configurar chaves no worker
-      await api.setSessionKeys(keys.privateKey, 1);
-      await api.joinAuthRoom(hashId);
-
-      // 4. Injetar nó PROFILE:AUTHENTICATION
-      const authNodeData = {
-        id: ulid(),
-        entity_id: hashId, // O hash serve de id de entidade
-        type: 'PROFILE:AUTHENTICATION',
-        epoch: 1,
-        created_at: Date.now(),
-        payload: JSON.stringify(encryptedMnemonicObj),
-        retention_state: 'integral'
-      };
-
-      await api.injectAndBroadcastNode(authNodeData);
-      
-      setRestoreProgressMsg('Sincronização concluída com sucesso!');
-      setIsRestoring(false);
-      
-      // Salvar credenciais locais
-      await saveIdentityAndStart(mnemonicText, keys.privateKey, keys.publicKey, hashId);
-    } catch (err: any) {
-      setIsRestoring(false);
-      setErrorMessage(err.message || 'Falha ao sincronizar custódia.');
-    }
+    // Dispara a inicialização do Worker pelo React e marca como pendente
+    setActivePeerName(peerNameInput.trim());
+    setIsCloudBackupPending(true);
   };
 
   // Restaurar por Mnemônico direto
@@ -392,69 +446,11 @@ export function App() {
     }
     setErrorMessage('');
     setIsRestoring(true);
-    setRestoreProgressMsg('Conectando ao canal WebRTC do Cloud...');
+    setRestoreProgressMsg('Inicializando worker de sincronização...');
 
-    try {
-      // 1. Iniciar worker temporário com o nome fornecido
-      setActivePeerName(peerNameInput.trim());
-
-      // Aguardar o worker estar online
-      let checks = 0;
-      let api: any = null;
-      while (checks < 30) {
-        await new Promise(r => setTimeout(r, 200));
-        api = (window as any).workerApi;
-        if (api) break;
-        checks++;
-      }
-      
-      if (!api) {
-        throw new Error("Worker de sincronização indisponível.");
-      }
-
-      setRestoreProgressMsg('Iniciando handshake e baixando sala auth-room...');
-      
-      // 2. Entrar na sala restrita
-      await api.joinAuthRoom(restoreIdentityHash.trim());
-
-      setRestoreProgressMsg('Aguardando sincronização de custódia (Zero-Knowledge)...');
-      
-      // 3. Polling local para ver se o nó de autenticação privado chega via P2P
-      let nodeRow: any = null;
-      let pollCount = 0;
-      while (pollCount < 20) {
-        const rows = await api.query(
-          "SELECT payload FROM nodes WHERE type = 'PROFILE:AUTHENTICATION' LIMIT 1"
-        );
-        if (rows.length > 0) {
-          nodeRow = rows[0];
-          break;
-        }
-        await new Promise(r => setTimeout(r, 1000));
-        pollCount++;
-      }
-
-      if (!nodeRow) {
-        throw new Error("O servidor ou par de custódia não respondeu. Certifique-se de que o ID está correto e que o servidor está conectado.");
-      }
-
-      setRestoreProgressMsg('Chave criptografada encontrada! Descriptografando...');
-
-      // 4. Descriptografar payload
-      const encryptedSecretObj = JSON.parse(nodeRow[0]);
-      const decryptedMnemonic = await cryptoApi.decryptSecret(encryptedSecretObj, restorePassword);
-      
-      setRestoreProgressMsg('Chave mestra verificada! Inicializando ambiente...');
-
-      // 5. Configurar chaves e salvar
-      const keys = await cryptoApi.deriveKeyPair(decryptedMnemonic);
-      await saveIdentityAndStart(decryptedMnemonic, keys.privateKey, keys.publicKey, restoreIdentityHash.trim());
-      setIsRestoring(false);
-    } catch (err: any) {
-      setIsRestoring(false);
-      setActivePeerName(null);
-      setErrorMessage(err.message || 'Erro na recuperação em nuvem. Verifique a senha.');
-    }
+    // Dispara a inicialização do Worker pelo React e marca como pendente
+    setActivePeerName(peerNameInput.trim());
+    setIsCloudRestorePending(true);
   };
 
   const handleLogout = () => {

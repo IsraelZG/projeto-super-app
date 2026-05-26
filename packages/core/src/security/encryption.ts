@@ -14,16 +14,16 @@ export async function encryptPayload(
   
   const aesKey = await globalThis.crypto.subtle.importKey(
     "raw",
-    keyBytes,
+    keyBytes as any,
     "AES-GCM",
     false,
     ["encrypt"]
   );
 
   const ciphertextBuffer = await globalThis.crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
+    { name: "AES-GCM", iv: iv as any },
     aesKey,
-    payloadBytes
+    payloadBytes as any
   );
 
   return {
@@ -46,16 +46,16 @@ export async function decryptPayload(
 
   const aesKey = await globalThis.crypto.subtle.importKey(
     "raw",
-    keyBytes,
+    keyBytes as any,
     "AES-GCM",
     false,
     ["decrypt"]
   );
 
   const decryptedBuffer = await globalThis.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: ivBytes },
+    { name: "AES-GCM", iv: ivBytes as any },
     aesKey,
-    ciphertextBytes
+    ciphertextBytes as any
   );
 
   return new Uint8Array(decryptedBuffer);
@@ -95,7 +95,7 @@ export async function decryptJson(
 export async function deriveEpochKey(masterKey: Uint8Array, epoch: number): Promise<Uint8Array> {
   const importedMaster = await globalThis.crypto.subtle.importKey(
     "raw",
-    masterKey,
+    masterKey as any,
     "HKDF",
     false,
     ["deriveBits"]

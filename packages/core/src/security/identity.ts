@@ -191,7 +191,7 @@ export async function decryptSecret(encrypted: EncryptedSecret, password: string
   const aesKey = await globalThis.crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt: salt,
+      salt: salt as any,
       iterations: 100000,
       hash: "SHA-256"
     },
@@ -202,9 +202,9 @@ export async function decryptSecret(encrypted: EncryptedSecret, password: string
   );
 
   const decryptedBuffer = await globalThis.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv },
+    { name: "AES-GCM", iv: iv as any },
     aesKey,
-    ciphertext
+    ciphertext as any
   );
 
   return new TextDecoder().decode(decryptedBuffer);

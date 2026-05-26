@@ -6,10 +6,9 @@ import {
   encryptSecret,
   decryptSecret,
   signMessage,
-  verifyMessage,
-  toBase64,
-  fromBase64
+  verifyMessage
 } from './identity.js';
+import { toBase64, fromBase64 } from './utils.js';
 
 describe('Infraestrutura de Identidade & Criptografia (BIP39, Ed25519, PBKDF2/AES)', () => {
   

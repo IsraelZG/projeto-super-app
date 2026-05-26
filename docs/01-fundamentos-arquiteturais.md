@@ -9,7 +9,7 @@
 ## Sumário
 
 1. [Visão e Posicionamento](#1-visão-e-posicionamento)
-2. [Princípios Arquiteturais Fundamentais](#2-princípios-arquiteturais-fundamentais)
+2. [Princípios Arquiteturais Fundamentais](#2-princípios-arquiteturais-fundamentais) (2.1–2.8)
 3. [Stack Tecnológica](#3-stack-tecnológica)
 4. [Formatos de Distribuição do Software](#4-formatos-de-distribuição-do-software)
 5. [Modalidades de Rede](#5-modalidades-de-rede)
@@ -75,7 +75,45 @@ Na ontologia do sistema, **nós são substantivos e arestas são verbos**. Esta 
 
 Esta regra previne uma classe inteira de bugs conceituais e mantém a ontologia coerente. Ela atua em conjunto com o princípio do minimalismo ontológico (seção 6.7), que regula quando criar novos subtipos.
 
-### 2.6 Princípio da Forma Única
+**Convenção Hierárquica de Nomenclatura de Arestas.** Para arestas relacionais de alto grau semântico — especialmente relações contínuas entre entidades — a nomenclatura segue o padrão formal:
+
+```
+VERBO:DOMÍNIO:SPECIFIER
+```
+
+Onde `VERBO` é a raiz verbal no presente contínuo, `DOMÍNIO` é a categoria ontológica da relação, e `SPECIFIER` é o refinamento opcional dentro do domínio. Exemplos canônicos:
+
+| Aresta | Leitura |
+|--------|---------|
+| `INTERACTS:CONTENT:LIKES` | peer interage com conteúdo via like |
+| `INTERACTS:CONTENT:SHARES` | peer interage com conteúdo via compartilhamento |
+| `RELATES:FAMILY:PARENT_OF` | relação familiar de paternidade/maternidade |
+| `RELATES:SOCIAL:FOLLOWS` | relação social de seguimento |
+| `PARTICIPATES_IN:GROUP:MEMBER` | pertencimento a grupo como membro |
+| `PARTICIPATES_IN:PROJECT:CONTRIBUTOR` | pertencimento a projeto como contribuidor |
+
+**`PARTICIPATES_IN` substitui permanentemente `MEMBER_OF`** em toda a ontologia. A mudança é semântica e arquitetural: relações contínuas de pertencimento usam verbo no presente, não substantivo fora de contexto. A aresta `MEMBER_OF` está depreciada; novas implementações devem usar `PARTICIPATES_IN` com o especificador adequado.
+
+Os **verbos raiz canônicos** da plataforma são:
+- `RELATES` — relações sociais, familiares e interpessoais.
+- `OWNS` — posse de ativos, recursos e documentos.
+- `GOVERNS` — governança, especificação e regulação.
+- `INTERACTS` — interações com conteúdo (curtidas, compartilhamentos, reações).
+- `PARTICIPATES_IN` — pertencimento contínuo a grupos, projetos e contextos.
+
+### 2.6 Princípio da Separação Autorização-Identidade
+
+**`ASSET:CAPABILITY` (permissão técnica baseada em UCAN) e arestas de pertencimento/relacionamento (fato social/estrutural) são primitivas independentes por design.** O sistema nunca infere autorização a partir de pertencimento.
+
+Concretamente:
+
+- A existência de uma aresta `PARTICIPATES_IN` ligando um peer a um grupo **não implica** que ele tem capability de leitura ou escrita sobre o conteúdo daquele grupo. Essa capability deve ser **delegada explicitamente** via `ASSET:CAPABILITY` com aresta `DELEGATED_TO`.
+- O registro de parentesco (`RELATES:FAMILY:PARENT_OF`) não concede acesso a dados financeiros do parente.
+- Pertencer a uma organização (`PARTICIPATES_IN:ORG`) não concede permissão para editar documentos da organização.
+
+Esta separação previne escalada acidental de privilégios, mantém o princípio do menor privilégio em domínios colaborativos, e garante que capabilities possam ser granularmente revogadas sem alterar a estrutura social do grafo. A SPECIFICATION de cada ação é a fonte canônica das capabilities exigidas; a topologia do grafo é evidência social, não prova de autorização.
+
+### 2.7 Princípio da Forma Única
 
 Para cada problema, há **uma forma canônica de resolvê-lo** no sistema. Comportamentos não são especificados em três lugares possíveis; são especificados em um lugar definido pela natureza do comportamento:
 
@@ -86,14 +124,14 @@ Para cada problema, há **uma forma canônica de resolvê-lo** no sistema. Compo
 
 Quando há ambiguidade sobre onde algo deve viver, prevalece a forma que minimiza duplicação e maximiza coesão. A flexibilidade arquitetural não justifica caos: liberdade para o desenvolvedor é menos valiosa que previsibilidade do sistema.
 
-### 2.7 Princípio da Imutabilidade do Passado
+### 2.8 Princípio da Imutabilidade do Passado
 
-O sistema é fundamentalmente append-only. SPECIFICATIONS, versões de nós e estados consolidados nunca são alterados via UPDATE. Mudanças geram novos nós ligados aos antigos por arestas semânticas (`SUPERSEDED_BY`, `MIGRATED_TO`, `MUTATES`). Relacionamentos não são deletados: são revogados pela emissão de uma nova aresta do mesmo tipo com `weight = 0` (lápide / tombstone).
+O sistema é fundamentalmente append-only. Mudanças geram novos nós ligados aos antigos por arestas semânticas. Para documentos colaborativos, a imutabilidade do passado é garantida por **nós-versão imutáveis**: cada commit cristaliza um novo nó cujo `payload` é o snapshot integral e autossuficiente do documento naquele instante (`Automerge.save(doc)`). O histórico completo de edições colaborativas é a **DAG nativa do Automerge**, navegável via `Automerge.getHistory()`, que preserva cada Change com autor, timestamp e conteúdo. Nós intermediários podem ter seus payloads podados pelo Garbage Collector para liberar espaço em disco, mas a **topologia do grafo — nós, arestas `MUTATES`, assinaturas e metadados — permanece intacta e auditável**.
 
 Isso garante:
 
-- Auditoria criptográfica perfeita via Linhagem de Versões.
-- Capacidade de "viajar no tempo" para qualquer estado anterior.
+- Auditoria criptográfica perfeita via Linhagem de Versões e DAG do Automerge.
+- Capacidade de "viajar no tempo" para qualquer estado anterior (reconstituindo o documento a partir do snapshot do nó-versão desejado).
 - Resolução de conflitos por evidência, não por sobrescrita.
 - Compatibilidade com criptografia de assinatura (não há "assinatura mutável").
 - Nós antigos nunca são re-encriptados: o histórico permanece selado criptograficamente na época em que foi criado.
@@ -110,15 +148,23 @@ Isso garante:
 - **Triggers SQLite** mantêm tabelas auxiliares de projeção (read models) não-replicáveis. Ver Documento 2.
 
 **Reatividade e Cache:**
-- **TinyBase** como camada reativa entre o sistema e a UI. Observa projeções mantidas pelo SQLite, observa o documento Y.js, conduz a escrita local, e expõe APIs reativas granulares para a UI.
-- A UI consome do TinyBase, nunca diretamente do SQLite ou do Y.js.
+- **TinyBase** como camada reativa entre o sistema e a UI. Observa projeções mantidas pelo SQLite e documentos Automerge via Automerge Repo, conduz a escrita local, e expõe APIs reativas granulares para a UI.
+- A UI consome do TinyBase, nunca diretamente do SQLite ou do Automerge.
 
-**Sincronização P2P:**
-- **Y.js** (CRDT) com providers customizados. O motor Y.js roda no contexto de um Web Worker.
+**Sincronização Colaborativa e P2P:**
+- **Automerge** (CRDT) como motor de edição colaborativa. Cada documento colaborativo é uma estrutura de dados com histórico imutável de Changes. Roda no contexto de um Web Worker.
+- **Automerge Repo** como camada de orquestração: gerencia o ciclo de vida de documentos Automerge, persistência local via OPFS, sincronização incremental de Changes entre peers, e **ephemeral messages** via WebRTC para coordenação de curto prazo (eleição de committer, coleta de assinaturas, negociação de epoch key).
 - Comunicação entre peers via **WebRTC** (data channels), com signaling via servidores federados ou Cloud da própria plataforma.
+- Para dados estruturados fora de documentos colaborativos (nós/arestas no grafo), a sincronização usa **Range-Based Set Reconciliation** sobre B-tree de fingerprints em memória. Detalhamento no Documento 2.
 
 **Identificadores:**
 - **ULID** em todo o sistema. Escolhido sobre UUID v7 por: representação textual mais compacta (26 vs. 36 caracteres, economia relevante no tráfego P2P de bilhões de IDs ao longo da vida do sistema), maior legibilidade em logs e auditoria (sem hífens, case-insensitive em Crockford Base32), e ordenação lexicográfica nativa por timestamp embutido (essencial para indexação eficiente em SQLite, evitando fragmentação de B-tree). Ambos têm 128 bits e timestamp nos 48 bits iniciais; o ganho de ULID é prático, não estrutural.
+
+  **Identificadores Tipados (Bitmasking de Caractere):** O sistema endereça uma ambiguidade estrutural inerente — arestas podem apontar para nós *ou* para outras arestas (ex: aresta `WITNESSED_BY` apontando para aresta `TRANSFERRED_TO`), tornando a coluna `target_id` na tabela `edges` polimórfica. Foreign Keys físicas do SQLite não suportam polimorfismo de tabela-alvo; elas são, portanto, substituídas por **Virtual Foreign Keys (VFK)** validadas pela camada de aplicação (detalhes no Documento 2). O mecanismo de roteamento é o **Bitmasking de Caractere**: o **11º caractere** do ULID (posição `index 10`, onde o bloco de 48 bits de timestamp encerra e os 80 bits de aleatoriedade começam em Crockford Base32) é fixado como **caractere de tipo** para roteamento instantâneo O(1) no TinyBase e nos Sync Workers:
+  - Fixado em **`N`** (Node) ──> Exemplo: `01J2X3Y4Z5N6Y7Z8A9BC` — o destino está na tabela `nodes`.
+  - Fixado em **`E`** (Edge) ──> Exemplo: `01J2X3Y4Z5E6Y7Z8A9BC` — o destino está na tabela `edges`.
+
+  A fixação sacrifica 5 bits (1 caractere Crockford Base32) dos 80 bits randômicos, reduzindo a entropia dos IDs de 80 para 75 bits — ainda astronomicamente improvável de colidir. O ganho operacional é a identificação imediata da tabela-alvo por inspeção do ID, sem consulta adicional, e a eliminação de FK físicas polimórficas no schema.
 
 **Criptografia:**
 - **WebCrypto API** para AES-256-GCM (encriptação de payload, com authentication tag interno) e Ed25519 (assinaturas).
@@ -276,7 +322,7 @@ Implicações:
 O mesmo app pode gerenciar múltiplas redes simultâneas:
 
 - Banco SQLite separado por rede.
-- Sync Y.js separado por rede.
+- Sync Automerge separado por rede (Automerge Repo por rede).
 - Peers separados por rede.
 - Sidebar de redes na UI permite trocar contexto.
 
@@ -314,7 +360,7 @@ Entidades ativas que possuem identidade criptográfica (par de chaves pública/p
 
 **Relação com arestas:**
 - *Emitem* ações: `AUTHORED`, `APPROVED_BY`, `SIGNED_BY`.
-- *Recebem* pertencimento ou ativos: `MEMBER_OF`, `DELEGATED_TO`, `OWNS`.
+- *Recebem* pertencimento ou ativos: `PARTICIPATES_IN`, `DELEGATED_TO`, `OWNS`.
 
 ### 6.2 CONTENT — A Informação
 
@@ -341,6 +387,12 @@ Quando uma ação exige validação não-trivial (multi-sig, quórum, árbitro e
 Isso é coerente com os quatro tipos: a intenção é informação passiva (uma proposta), e portanto é CONTENT. Não há quinto tipo `EVENT`.
 
 Ações **auto-aprovadas single-user** (specification declara mecanismo de validação `auto_self`, ex: curtir um post, escrever nota privada) **não materializam** um `CONTENT:INTENT`: a intenção é transitória em memória, a validação local é instantânea, e o que é persistido é diretamente a ação (nova versão do nó-alvo, ou nó novo, ou aresta). O ciclo completo de intenção materializada é detalhado no Documento 3.
+
+#### 6.2.2 CONTENT:AUDIT_LOG — Log Semântico no Grafo
+
+**CONTENT:AUDIT_LOG** (Subtipo de Conteúdo): Substitui a antiga tabela física de auditoria e unifica o log semântico diretamente no grafo replicável. Ele carrega a intenção humana e o significado de negócio da alteração (JSON contendo o mapeamento de paths e os valores before/after).
+
+**Regra de Acoplamento:** Todo nó de mutação técnica (`CONTENT:DOCUMENT`) que carrega um delta binário de CRDT deve emitir uma aresta estrutural do tipo `AUDITED_BY` apontando para o seu correspondente nó `CONTENT:AUDIT_LOG`, eliminando redundâncias e permitindo auditoria e reversão seletiva (Undo semântico) entre sessões de edição.
 
 ### 6.3 ASSET — O Valor e a Permissão
 
@@ -411,7 +463,7 @@ Arestas representam relações e ações no grafo. Toda aresta tem `id`, `entity
 
 **Divisão semântica de alvos.** O alvo de uma aresta aponta para `entity_id` ou para `id` específico conforme a natureza do tipo de aresta:
 
-- **Arestas estruturais permanentes** (`OWNS`, `MEMBER_OF`, `DELEGATED_TO`, `BELONGS_TO`) apontam para `entity_id`. Assim, quando a entidade ganha nova versão, a aresta não fica órfã.
+- **Arestas estruturais permanentes** (`OWNS`, `PARTICIPATES_IN`, `DELEGATED_TO`, `BELONGS_TO`) apontam para `entity_id`. Assim, quando a entidade ganha nova versão, a aresta não fica órfã.
 - **Arestas de interação transacional** (`APPROVED_BY`, `MUTATES`, `RESOLVES`) apontam para o `id` da versão específica que estão afetando ou aprovando.
 
 A SPECIFICATION de cada tipo de aresta declara qual comportamento ela segue.
@@ -424,7 +476,9 @@ A SPECIFICATION de cada tipo de aresta declara qual comportamento ela segue.
 
 *Validação e consolidação:* `APPROVED_BY`, `RESOLVES`, `WITNESSED_BY`.
 
-*Pertencimento e estrutura:* `MEMBER_OF`, `OWNS`, `BELONGS_TO`, `CONTAINS`.
+*Causalidade e origem:* `RESULTED_FROM` — liga um nó consequente (ex: nó `ASSET:BALANCE_STATE` gerado por uma transferência) à aresta ou nó causal que o originou (ex: a aresta `TRANSFERRED_TO` da transação). Permite rastreamento causal O(1) sem varredura de Linhagem de Versões. O `target_id` de uma aresta `RESULTED_FROM` pode ser do tipo `E` (apontar para outra aresta), sendo este o caso arquetípico de polimorfismo resolvido pelo Bitmasking de Caractere.
+
+*Pertencimento e estrutura:* `PARTICIPATES_IN`, `OWNS`, `BELONGS_TO`, `CONTAINS`.
 
 *Transferência e delegação:* `TRANSFERRED_TO`, `DELEGATED_TO`, `GRANTED_TO`, `REVOKED_FROM`.
 
@@ -544,6 +598,44 @@ A SPECIFICATION da rede define o modelo padrão e pode permitir customização p
 
 Reiterando 5.5: cada rede é instância isolada com banco próprio. App orquestra. Preferências globais do dispositivo ficam em espaço local não-replicável.
 
+### 7.8 Agentes de Sistema (PROFILE:SYSTEM) e Modelo de Delegação Cruzada
+
+A plataforma trata como **cidadãos de primeira classe** os nós do tipo `PROFILE:SYSTEM` — entidades dotadas de identidade criptográfica plena (par de chaves Ed25519) que executam funções de infraestrutura, validação, auditoria e automação, com distintos graus de visibilidade ao usuário final. Não são cidadãos de segunda classe nem abstrações técnicas: participam do grafo com as mesmas primitivas de autoria, assinatura e delegação que qualquer `PROFILE` humano.
+
+#### 7.8.1 Categorias de Agentes de Sistema
+
+**Agentes explícitos (visíveis ao usuário):**
+
+- *Peer do sistema / fundador*: o `PROFILE:SYSTEM` canônico da rede. Aparece como entidade identificável em interfaces públicas, é o primeiro bootstrap peer e mantém infraestrutura de signaling e snapshots. Toda aresta de acolhimento de onboarding parte deste agente.
+- *Validadores de Domínio identificados*: agentes de validação financeira, fiscal ou regulada cujo nome e chave pública são declarados na SPECIFICATION que os designa. Usuários e auditores podem inspecionar qual agente validou uma transação consultando a aresta `AUTHORED` do nó emitido ou a aresta `RESOLVES` do ciclo de intenção.
+
+**Agentes implícitos (invisíveis ao usuário — automatismos de infraestrutura):**
+
+- *Agentes de automação local em background*: processos executando em Web Workers no dispositivo do usuário. Realizam validações auto-aprovadas, gerenciam rotação de época, compactação de CRDT, reindexação de índices locais e coleta de lixo. São materializados como `PROFILE:SYSTEM` privados ao dispositivo de cada usuário; suas assinaturas são verificáveis localmente, mas sua identidade não é exposta em interfaces de terceiros.
+- *Agentes de auditoria invisíveis*: registram eventos semânticos no grafo de forma transparente e contínua, sem intervenção do usuário. Operam silenciosamente emitindo nós `CONTENT:AUDIT_LOG` e arestas `AUDITED_BY`. Nunca expostos como interlocutores em interfaces públicas.
+- *Super Peers de indexação*: `PROFILE:SYSTEM` de alta capacidade que mantêm índices de grafos de larga escala, respondem a buscas federadas e servem como ponto de acolhimento para onboarding. Detalhamento de seu papel no ciclo de onboarding seguro no Documento 3, seção de Arquitetura de Onboarding.
+- *Agentes de mensageria interna*: toda a comunicação de infraestrutura entre microsserviços do sistema (filas de processamento, buscas de rede, coordenação de validação) é feita via nós `CONTENT:MESSAGE` (com subtipos técnicos como `SYSTEM_QUERY` ou `SYSTEM_RESPONSE`) emitidos por `PROFILE:SYSTEM` e conectados aos destinatários por arestas `DIRECTED_TO` ou `REPLIES_TO`. O sistema opera offline-first mesmo na comunicação interna: agentes escrevem mensagens no grafo, e a entrega é garantida pela replicação P2P, sem necessidade de canal de mensageria externo ao grafo.
+
+#### 7.8.2 Modelo de Delegação Cruzada (UCAN + ASSET:CAPABILITY)
+
+Agentes de sistema e perfis humanos delegam capacidades a outros agentes por meio de tokens UCAN, materializados no grafo como nós `ASSET:CAPABILITY` amarrados por arestas `DELEGATED_TO`. A cadeia de delegação é verificável criptograficamente: cada elo carrega a assinatura do delegante anterior, impedindo escalada de privilégios.
+
+**Cadeia de delegação típica (humano → agente local):**
+
+1. `PROFILE:AUTHENTICATION` de Alice gera `ASSET:CAPABILITY` com escopo delimitado (ex: "assinar intenções de transferência de até R$ 500 na conta X", com TTL de 24 horas).
+2. Aresta `DELEGATED_TO` amarra a capability ao agente de automação local de Alice — um `PROFILE:SYSTEM` privado do dispositivo dela, criado no onboarding.
+3. O agente local pode sub-delegar uma capability ainda mais restrita para outros serviços, sempre dentro do escopo recebido. UCAN não permite escalar privilégios além do que foi originalmente concedido.
+
+**Delegação organizacional (empresa → agente validador):**
+
+1. `PROFILE:ORGANIZATION` (empresa) delega capability de "validar transferências financeiras internas da empresa" a um `PROFILE:SYSTEM` Validador Financeiro designado.
+2. O Validador Financeiro emite capabilities temporárias (TTL curto, ex: 4 horas) para peers de funcionários ao autenticarem, sem expor a chave privada organizacional.
+3. Ao revogar a capability do Validador Financeiro (aresta de lápide com `weight = 0`), toda a árvore de sub-delegações derivadas perde validade matematicamente — forward secrecy de delegação.
+
+**Capabilities intransferíveis:**
+
+SPECIFICATIONs podem declarar capabilities como *intransferíveis* (`delegatable: false`) para funções sensíveis (ex: capability "ser o Validador Mestre da rede" não pode ser sub-delegada). Uma SPECIFICATION pode também exigir que determinada ação seja executada *exclusivamente* por um `PROFILE:SYSTEM` designado, recusando delegações de usuário mesmo que tecnicamente válidas.
+
 ---
 
 ## 8. Threat Model e Princípios de Segurança
@@ -614,7 +706,7 @@ Detalhes de rotação por época, KMS online-optional e modo restrito de UCAN es
 
 **Local-First** — Paradigma onde dados nascem e vivem no dispositivo do usuário; sincronização é secundária e oportunística.
 
-**MFA-S** — Mecanismo de escopo restrito que, **apenas em documentos de edição colaborativa**, analisa diffs binários do CRDT e produz diff semântico legível. Não é a auditoria da plataforma; a auditoria universal é a Linhagem de Versões.
+**MFA-S (Semantic Mapper)** — Mecanismo de escopo restrito que, **apenas em documentos de edição colaborativa**, analisa o histórico do Automerge (`Automerge.getHistory()`) cruzado com arestas `AUTHORED` e produz diff semântico legível sob demanda. O cálculo é **lazy** — não é pré-computado nem armazenado em logs separados. Não é a auditoria da plataforma; a auditoria universal é a Linhagem de Versões.
 
 **Modalidade de Rede** — Modelo de governança e infraestrutura: pública, corporativa whitelabel, P2P pura.
 
@@ -634,7 +726,7 @@ Detalhes de rotação por época, KMS online-optional e modo restrito de UCAN es
 
 **Tier-aware Degradation** — Capacidade do sistema de adaptar comportamento conforme capacidade do dispositivo, com transparência ao usuário.
 
-**TinyBase** — Biblioteca usada como camada reativa entre o sistema e a UI. Observa projeções do SQLite e o documento Y.js; conduz escrita local; nunca é a fonte de verdade.
+**TinyBase** — Biblioteca usada como camada reativa entre o sistema e a UI. Observa projeções do SQLite e documentos Automerge via Automerge Repo; conduz escrita local; nunca é a fonte de verdade.
 
 **ULID** — Universally Unique Lexicographically Sortable Identifier. Identificador de 128 bits usado em todo o sistema.
 
@@ -644,7 +736,29 @@ Detalhes de rotação por época, KMS online-optional e modo restrito de UCAN es
 
 **Whitelabel** — Modalidade onde uma empresa opera sua própria instância da plataforma sob marca própria.
 
-**Y.js** — Implementação de CRDT usada como motor de sincronização entre peers. Roda no contexto de um Web Worker.
+**Automerge** — Implementação de CRDT usada como motor de edição colaborativa. Cada documento é uma estrutura de dados com histórico imutável de Changes. `Automerge.save(doc)` produz snapshot binário integral e autossuficiente; `Automerge.getHistory(doc)` expõe a DAG completa de mudanças para auditoria e diff semântico.
+
+**Automerge Repo** — Camada de orquestração sobre Automerge. Gerencia ciclo de vida de documentos, persistência local via OPFS, sincronização incremental de Changes entre peers, e Ephemeral Messages via WebRTC para coordenação de committers.
+
+**Changes** — Operações elementares registradas pelo Automerge ao editar um documento. São as unidades atômicas de mudança capturadas pelo Sync Worker na RAM pré-commit e persistidas na tabela local `pending_changes`. Após o commit, as Changes são consolidadas no snapshot do nó-versão e removidas de `pending_changes`.
+
+**Ephemeral Messages** — Canal de mensagens voláteis provido pelo Automerge Repo via WebRTC. Não são persistidas no grafo. Usadas para coordenação de curto prazo: eleição de committer, coleta de assinaturas em commit colaborativo, negociação de epoch key. Complementam (não substituem) os `CONTENT:MESSAGE` do grafo, que são persistentes e auditáveis.
+
+**PARTICIPATES_IN** — Substitui permanentemente `MEMBER_OF`. Aresta de pertencimento contínuo, no padrão `PARTICIPATES_IN:DOMÍNIO:SPECIFIER`. Expressão de fato social/estrutural; **não implica** `ASSET:CAPABILITY` sobre o conteúdo do contexto. Ver Princípio 2.6.
+
+**Verbos Raiz Canônicos** — Conjunto de verbos base para nomenclatura de arestas no padrão `VERBO:DOMÍNIO:SPECIFIER`: `RELATES` (relações sociais/estruturais), `OWNS` (posse de ativos), `GOVERNS` (governança e especificação), `INTERACTS` (interações com conteúdo), `PARTICIPATES_IN` (pertencimento contínuo a grupos/contextos). Ver Princípio 2.5.
+
+**RESULTED_FROM** — Aresta estrutural que liga um nó consequente (ex: nó `ASSET:BALANCE_STATE` gerado por uma transferência) à aresta ou nó causal que o originou (ex: a aresta `TRANSFERRED_TO` da transação). Permite rastreamento causal O(1) sem varredura da Linhagem de Versões. O `target_id` de uma aresta `RESULTED_FROM` pode ser do tipo `E` — este é o caso canônico de polimorfismo resolvido pelo Bitmasking de Caractere.
+
+**RESOLVES** — Aresta que fecha o ciclo de uma intenção materializada. Emitida pelo validador (ou pelo n-ésimo votante em quórum) em direção ao nó `CONTENT:INTENT` que foi consolidado, indicando que a intenção foi consumada como fato histórico e que o ciclo está encerrado. Fonte: `entity_id` do `PROFILE` validador. Alvo: `id` específico do `CONTENT:INTENT` (apontando para a versão exata da intenção consumada).
+
+**Virtual Foreign Key (VFK)** — Constraint de integridade referencial aplicada pela camada de aplicação, em substituição às Foreign Keys físicas do SQLite na tabela `edges`. Necessária porque `target_id` é polimórfico: pode referenciar linhas em `nodes` *ou* em `edges`. A resolução usa o **11º caractere (index 10)** do ULID (`N` = nodes, `E` = edges) para determinar a tabela-alvo em O(1) sem joins adicionais. Registros que chegam via P2P com pai ausente localmente recebem `retention_state = 'orphan'` até reidratação. Detalhes no Documento 2.
+
+**PROFILE:SYSTEM** — Subtipo de PROFILE que representa entidades com identidade criptográfica plena (par de chaves Ed25519) que executam funções automatizadas de infraestrutura, validação, auditoria ou mensageria. Inclui o peer do sistema do fundador, Validadores de Domínio designados, agentes de automação local em background, agentes de auditoria invisíveis, e super peers de indexação. São cidadãos de primeira classe do grafo, com as mesmas primitivas de autoria e delegação que perfis humanos. Detalhamento em 7.8.
+
+**CONTENT:INTENT** — Subtipo de CONTENT que materializa a intenção de uma ação que exige validação não-trivial. Carrega a proposta bruta assinada pelo usuário (ex: proposta de transferência, solicitação de criação/edição de perfil, alteração de specification). Não é um quinto tipo de nó; é um CONTENT passivo que trafega pela rede até o validador competente. Quando validado, o ciclo é fechado por uma aresta `RESOLVES` emitida pelo validador apontando de volta para o `CONTENT:INTENT`. Ver 6.2.1 e Documento 3.
+
+**CONTENT:MESSAGE** — Subtipo de CONTENT usado para toda comunicação de infraestrutura entre agentes e microsserviços do sistema. Subtipos técnicos incluem `SYSTEM_QUERY`, `SYSTEM_RESPONSE`, `ONBOARDING_REQUEST`, `ONBOARDING_ACCEPTED`, `RECOVERY_REQUEST`, entre outros definidos pelas SPECIFICATIONs canônicas. Conectado a destinatários via arestas `DIRECTED_TO`; respondido via arestas `REPLIES_TO`. Opera offline-first: agentes escrevem no grafo, a entrega é garantida pela replicação P2P.
 
 ---
 

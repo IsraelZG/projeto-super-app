@@ -17,11 +17,5 @@ export function getCryptoApi(): Comlink.Remote<CryptoWorkerType> {
 }
 
 export function useCrypto() {
-  const [cryptoApi, setCryptoApi] = useState<Comlink.Remote<CryptoWorkerType> | null>(null);
-
-  useEffect(() => {
-    setCryptoApi(getCryptoApi());
-  }, []);
-
-  return cryptoApi;
+  return getCryptoApi();
 }

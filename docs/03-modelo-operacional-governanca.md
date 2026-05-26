@@ -54,7 +54,7 @@ A distinção mais importante para entender o modelo operacional:
 - Curtidas, reações, marcadores.
 - Posts no feed social.
 
-CRDT (Y.js) resolve naturalmente. Múltiplas intenções concorrentes são merged, todas se materializam.
+CRDT (Automerge) resolve naturalmente. Múltiplas intenções concorrentes são merged, todas se materializam.
 
 **Domínios não-comutativos** (ordem importa, ou exclusividade é exigida):
 - Transferências financeiras.
@@ -130,7 +130,7 @@ A intenção validada cristaliza em fato histórico na rede.
 - A aresta `MUTATES` (que já carrega o diff ou payload) serve como a ligação evolutiva, apontando para o `entity_id` e formando a Linhagem de Versões imutável.
 - Aresta `APPROVED_BY` (opcional, conforme SPECIFICATION) é adicionada por validadores que atestaram o consenso.
 
-Após a Etapa 3, Y.js sincroniza o sub-grafo (nova versão do CONTENT + arestas) pela rede. A Ordem de Compra passa a existir oficialmente para todos os membros que têm acesso de leitura.
+Após a Etapa 3, o Automerge Repo sincroniza o sub-grafo (nova versão do CONTENT + arestas) pela rede. A Ordem de Compra passa a existir oficialmente para todos os membros que têm acesso de leitura.
 
 ### 2.4 Aprovações Single-User (Caso Trivial)
 
@@ -153,7 +153,57 @@ Para ações que exigem múltiplas aprovações:
 - Há uma cláusula de `consolidation_timeout_ms` definida na SPECIFICATION. Se o n-ésimo votante ficar offline antes de consolidar e o timeout expirar, a autoridade de consolidação passa ao (n+1)-ésimo votante ou qualquer outro membro do quórum.
 - Aprovações tardias são rejeitadas com `REJECTED`.
 
-### 2.6 Aprovações Concorrentes em Recursos Finitos
+### 2.6 Commit Colaborativo em Documentos Compartilhados
+
+Em documentos com múltiplos co-editores, as Changes acumuladas em `pending_changes` precisam ser consolidadas em um único nó-versão assinado. O responsável por assinar e emitir esse nó é o **Committer** — papel efêmero, distinto do proprietário institucional do documento.
+
+A SPECIFICATION do documento declara o **modo de Committer** entre quatro opções canônicas:
+
+1. **`first_proposer`** — O primeiro peer a detectar o gatilho de commit (heurística de inatividade ou limiar de operações acumuladas) assina e emite o nó-versão. Adequado para documentos com um editor principal habitual, onde disputas de concorrência são raras.
+2. **`system_agent`** — Um `PROFILE:SYSTEM` designado na SPECIFICATION (ex: agente de automação local do criador do documento) é sempre o Committer. Elimina disputas de concorrência ao custo de depender da disponibilidade do agente.
+3. **`deterministic`** — Um algoritmo determinístico (ex: menor `entity_id` lexicográfico entre os co-editores com edições ativas no ciclo corrente) seleciona o Committer sem necessidade de coordenação extra. Todos os peers chegam à mesma conclusão independentemente.
+4. **`manual`** — O Committer é designado explicitamente por um peer com capability de governança (`GOVERNS`) sobre o documento. Adequado para documentos de alta governança onde a responsabilidade pelo commit deve ser auditável de forma explícita.
+
+#### Coordenação de Assinaturas
+
+Quando a SPECIFICATION exige co-assinatura de múltiplos peers antes da emissão do nó-versão (ex: modo de aprovação por quórum aplicado ao commit), a coleta de assinaturas ocorre via **Ephemeral Messages** do Automerge Repo na RAM — o candidato a Committer anuncia o snapshot proposto, os co-signatários respondem com suas assinaturas, e o Committer agrega todas antes de persistir o nó em `nodes`. Nenhuma mensagem de coordenação é gravada no grafo imutável.
+
+#### Separação entre Committer e Proprietário
+
+O **proprietário institucional** do documento (aresta estável `OWNS` de um `PROFILE` sobre o nó de conteúdo) é uma relação permanente e independente do Committer efêmero de cada ciclo. Trocar o Committer — por reconfiguração da SPECIFICATION ou por ausência do agente designado — não altera o ownership, não dispara transferência de capabilities, e não produz aresta no grafo além da atualização versionada da própria SPECIFICATION.
+
+### 2.7 Convites e Aprovações de Acesso como CONTENT:INTENT
+
+Convites para grupos, projetos, papéis corporativos e quaisquer fluxos de aprovação de acesso pendente **não são** materializados como `CONTENT:MESSAGE`. São instâncias do tipo universal `CONTENT:INTENT` com máquina de estados declarativa e atomicidade garantida no aceite.
+
+#### Máquina de Estados do Convite
+
+```
+PENDING ──→ APPROVED
+        ──→ REJECTED
+        ──→ REVOKED
+        ──→ EXPIRED
+```
+
+Cada transição é fechada com uma aresta `RESOLVES` apontando do nó que encerrou o fluxo de volta ao `CONTENT:INTENT` original, carregando `outcome` como atributo.
+
+- **`APPROVED`**: o convidado aceita. A transição dispara **atomicamente**:
+  1. Materialização de capabilities via UCAN condicional pré-assinado pelo admin na criação do convite.
+  2. Criação de aresta de pertencimento estrutural (`PARTICIPATES_IN:DOMÍNIO:SPECIFIER`) ligando o perfil do convidado ao contexto alvo.
+  3. Aresta `RESOLVES` com `outcome: "APPROVED"` encerrando o ciclo.
+- **`REJECTED`**: o convidado recusa explicitamente. Aresta `RESOLVES` com `outcome: "REJECTED"`. Nenhuma capability é emitida.
+- **`REVOKED`**: o emissor cancela antes do aceite. Aresta `RESOLVES` com `outcome: "REVOKED"`. Se o UCAN condicional já havia sido gerado, é revogado em cadeia.
+- **`EXPIRED`**: o TTL configurado na SPECIFICATION do contexto alvo expira sem resposta. O Garbage Collector fecha o ciclo com aresta `RESOLVES` e `outcome: "EXPIRED"` automaticamente.
+
+#### UCAN Condicional e Atomicidade Offline
+
+O UCAN condicional é pré-assinado pelo administrador do contexto no momento da criação do convite — não no momento do aceite. Essa antecipação garante que o aceite seja **atômico e offline-capable**: o convidado não precisa de round-trip ao admin para completar a transição `APPROVED`. O UCAN carrega a condição `accepted_by: <entity_id do convidado>` e só se torna operacional após a aresta `RESOLVES` correspondente ser inserida no grafo local do convidado.
+
+#### Separação de Semânticas
+
+`CONTENT:MESSAGE` permanece reservado para comunicação entre peers (chat, notificações, queries de sistema). Qualquer fluxo com estado pendente, prazo de validade, e efeito colateral estruturado sobre o grafo (capabilities, arestas de pertencimento) deve ser modelado como `CONTENT:INTENT`, independente de ser coloquialmente chamado de "convite", "pedido de aprovação", ou "solicitação de acesso".
+
+### 2.8 Aprovações Concorrentes em Recursos Finitos
 
 Quando múltiplos peers tentam consumir o mesmo recurso finito ao mesmo tempo:
 
@@ -162,7 +212,7 @@ Quando múltiplos peers tentam consumir o mesmo recurso finito ao mesmo tempo:
 - Aplica regra (FIFO, prioridade, sorteio — definido pela SPECIFICATION).
 - Vencedora vira ação. Demais recebem REJECTED com motivo "recurso esgotado".
 
-### 2.7 Falhas de Validação Online
+### 2.9 Falhas de Validação Online
 
 Em P2P puro com validador offline:
 
@@ -172,62 +222,211 @@ Em P2P puro com validador offline:
 
 UX: usuário vê estado "aguardando confirmação" claramente, com explicação de que ação depende de validador online.
 
+### 2.10 Coreografia Detalhada: Transferência Financeira (Alice → Bob)
+
+Esta subseção detalha o ciclo completo de uma transferência financeira como exemplo canônico do domínio não-comutativo, integrando todos os elementos arquiteturais: nó `CONTENT:INTENT` assinado pelo usuário, validação pelo agente `PROFILE:SYSTEM`, emissão atômica da aresta factual `TRANSFERRED_TO`, fechamento do ciclo via `RESOLVES`, geração de nós `ASSET:BALANCE_STATE` com encadeamento linear por hash via `MUTATES` (com `previous_hash`), e rastreamento causal via `RESULTED_FROM`.
+
+#### Pré-condições
+
+- Alice possui um nó `ASSET:BALANCE_STATE` vigente ($V_{n-1}$) com saldo suficiente; sua cabeça está registrada em `entity_heads`.
+- Bob possui seu próprio nó `ASSET:BALANCE_STATE` vigente ($V_{m-1}$); sua cabeça está em `entity_heads`.
+- Existe um Validador de Domínio financeiro (`PROFILE:SYSTEM:FINANCIAL_VALIDATOR`) com capability declarada pela `SPECIFICATION:TRANSFER`.
+
+#### Passo 1 — Criação e Assinatura do Nó CONTENT:INTENT
+
+Alice cria e assina localmente o nó de intenção. **Nenhum saldo é alterado neste momento.**
+
+```
+Nó CONTENT:INTENT criado (assinado por Alice):
+  id: "01J2X3Y4Z5N..."  (11º char = 'N' — é um nó)
+  type: "CONTENT:INTENT"
+  payload (criptografado):
+    action:               "TRANSFER"
+    amount:               100.00
+    currency:             "BRL"
+    from_entity_id:       <entity_id do ASSET:BALANCE_STATE de Alice>
+    to_entity_id:         <entity_id do ASSET:BALANCE_STATE de Bob>
+    from_balance_head_id: <id de V_{n-1} de Alice>  ← ancora em versão específica
+  signature: <Ed25519 de Alice>
+
+Aresta AUTHORED:    Alice.PROFILE → CONTENT:INTENT
+Aresta GOVERNED_BY: CONTENT:INTENT → SPECIFICATION:TRANSFER
+```
+
+O nó `CONTENT:INTENT` é persistido localmente e propagado ao Validador via Automerge Repo/WebRTC como `CONTENT:MESSAGE` de `SYSTEM_QUERY` dirigido ao validador (aresta `DIRECTED_TO`).
+
+#### Passo 2 — Validação pelo Agente PROFILE:SYSTEM
+
+O `PROFILE:SYSTEM:FINANCIAL_VALIDATOR` recebe o `CONTENT:INTENT` e executa:
+
+1. Decripta e valida o payload contra `SPECIFICATION:TRANSFER`.
+2. Consulta `entity_heads` pelo `from_entity_id` de Alice → obtém o nó $V_{n-1}$ em O(1).
+3. Verifica que o saldo em $V_{n-1}$ é ≥ 100,00 BRL.
+4. Verifica que o `from_balance_head_id` declarado na intenção coincide com o `entity_heads` atual (proteção contra intenções obsoletas concorrentes).
+5. Verifica que Alice tem capability de transferência ativa (UCAN válido, dentro do TTL).
+6. Verifica ausência de `ASSET:LOCK` ativo sobre o recurso de Alice.
+
+Se qualquer verificação falha: o Validador emite aresta `REJECTED` apontando para o `CONTENT:INTENT` com payload de motivo; ciclo encerrado.
+
+Se todas passam: o Validador executa **atomicamente** os Passos 3 e 4.
+
+#### Passo 3 — Emissão Atômica da Aresta Factual e do RESOLVES
+
+O Validador emite e assina a aresta factual de transferência:
+
+```
+Aresta TRANSFERRED_TO criada (assinada pelo FINANCIAL_VALIDATOR):
+  id: "01J2X3Y4Z5E..."  (11º char = 'E' — é uma aresta)
+  source_id: <id de V_{n-1} de Alice>
+  target_id: <entity_id do ASSET:BALANCE_STATE de Bob>  (char 'N')
+  type: "TRANSFERRED_TO"
+  payload (criptografado):
+    amount:       100.00
+    currency:     "BRL"
+    intent_id:    <id do CONTENT:INTENT de Alice>
+    validated_at: <unix_ms>
+  weight: 100.0
+  signature: <Ed25519 do FINANCIAL_VALIDATOR>
+```
+
+Imediatamente após, o Validador fecha o ciclo da intenção:
+
+```
+Aresta RESOLVES criada (assinada pelo FINANCIAL_VALIDATOR):
+  source_id: <entity_id de PROFILE:SYSTEM:FINANCIAL_VALIDATOR>
+  target_id: <id do CONTENT:INTENT de Alice>   ← aponta para versão específica da intenção
+  type: "RESOLVES"
+  payload: { outcome: "APPROVED", transferred_edge_id: <id da aresta TRANSFERRED_TO> }
+  signature: <Ed25519 do FINANCIAL_VALIDATOR>
+```
+
+A aresta `RESOLVES` encerra o ciclo do `CONTENT:INTENT`: qualquer peer que observe esse nó de intenção pode verificar que ele foi consumado, por quem, e quando — sem ambiguidade.
+
+#### Passo 4 — Geração de Nós ASSET:BALANCE_STATE com Encadeamento por Hash
+
+O Validador gera dois novos nós de estado de saldo, encadeados linearmente com suas versões anteriores via `previous_hash`. O campo `previous_hash` no payload de cada aresta `MUTATES` contém o hash do `id` do nó predecessor, criando uma corrente verificável que detecta qualquer adulteração histórica.
+
+**Alice — novo nó de saldo $V_n$ (débito):**
+
+```
+Nó ASSET:BALANCE_STATE criado:
+  id: "01J2X3Y4Z5N..."  (11º char = 'N')
+  entity_id: <mesmo entity_id de V_{n-1} de Alice>  ← mesma linhagem
+  type: "ASSET:BALANCE_STATE"
+  payload (criptografado):
+    balance:       <saldo_anterior_alice - 100.00>
+    currency:      "BRL"
+    previous_hash: hash(id de V_{n-1})
+
+Aresta MUTATES (encadeamento linear):
+  source_id: <id de V_{n-1}>   ← versão anterior
+  target_id: <id de V_n>       ← nova versão
+  type: "MUTATES"
+  payload: { previous_hash: hash(id de V_{n-1}), delta: "-100.00 BRL" }
+
+Aresta RESULTED_FROM (atalho causal):
+  source_id: <id de V_n de Alice>
+  target_id: <id da aresta TRANSFERRED_TO>  (11º char = 'E' — aponta para aresta)
+  type: "RESULTED_FROM"
+```
+
+**Bob — novo nó de saldo $V_m$ (crédito):**
+
+```
+Nó ASSET:BALANCE_STATE criado:
+  id: "01J2X3Y4Z5N..."  (11º char = 'N')
+  entity_id: <mesmo entity_id de V_{m-1} de Bob>   ← mesma linhagem
+  type: "ASSET:BALANCE_STATE"
+  payload (criptografado):
+    balance:       <saldo_anterior_bob + 100.00>
+    currency:      "BRL"
+    previous_hash: hash(id de V_{m-1})
+
+Aresta MUTATES (encadeamento linear):
+  source_id: <id de V_{m-1}>  ← versão anterior
+  target_id: <id de V_m>      ← nova versão
+  type: "MUTATES"
+  payload: { previous_hash: hash(id de V_{m-1}), delta: "+100.00 BRL" }
+
+Aresta RESULTED_FROM (atalho causal):
+  source_id: <id de V_m de Bob>
+  target_id: <id da aresta TRANSFERRED_TO>  (11º char = 'E')
+  type: "RESULTED_FROM"
+```
+
+#### Passo 5 — Atualização de entity_heads e Propagação
+
+Triggers SQLite detectam os novos nós $V_n$ e $V_m$ e atualizam imediatamente `entity_heads`:
+
+```
+entity_heads[entity_id_alice_balance] = id de V_n
+entity_heads[entity_id_bob_balance]   = id de V_m
+```
+
+O TinyBase observa `entity_heads` e re-renderiza o saldo de Alice e Bob na UI em O(1), sem recalcular a Linhagem de Versões. O Sync Worker propaga o sub-grafo resultante (novas arestas + novos nós de saldo) via Automerge Repo para os peers autorizados.
+
+#### Garantias do Protocolo
+
+**Encadeamento linear por hash:** o `previous_hash` na aresta `MUTATES` cria uma corrente verificável. Qualquer inserção, remoção ou modificação de nó intermediário na linhagem de saldo de Alice quebra a corrente de hashes. A verificação é local e não requer rede.
+
+**Atalho causal via RESULTED_FROM:** a partir de qualquer nó `ASSET:BALANCE_STATE`, é possível chegar imediatamente — via a aresta `RESULTED_FROM` com `target_id` de tipo `'E'` — à aresta `TRANSFERRED_TO` que o originou. A UI do extrato financeiro usa este atalho para exibir o vínculo "ver transação" sem varrer a Linhagem de Versões.
+
+**Idempotência garantida pelo ancoragem em `from_balance_head_id`:** o Validador rejeita qualquer `CONTENT:INTENT` cujo `from_balance_head_id` não corresponda ao `entity_heads` atual de Alice no momento da validação. Se Alice submeter duas intenções concorrentes sobre o mesmo estado $V_{n-1}$, apenas a primeira a chegar ao Validador será aceita; a segunda será `REJECTED` por head divergente.
+
 ---
 
 ## 3. MFA-S: Framework de Auditoria Semântica
 
-### 3.1 Propósito e Filosofia (Trilhas Paralelas)
+### 3.1 Princípio: Auditoria Emergente da DAG
 
-O **MFA-S (Multi-Factor Audit Semantic)** em domínios de edição colaborativa (documentos, planilhas) atua como uma ponte integradora entre o dinamismo em tempo real do **Y.js (CRDT)** e a persistência imutável e estruturada do **SQLite**. Em vez de manter logs de updates intermináveis ou diffs semânticos puros e isolados, o framework resolve os dilemas de sistemas local-first por meio de duas trilhas paralelas de dados:
+A infraestrutura de logs de auditoria como entidade física separada é eliminada. Não existem tabelas físicas `audit_logs` nem nós `CONTENT:AUDIT_LOG` emitidos por agentes de auditoria em paralelo ao fluxo principal.
 
-1. **Trilha CRDT (Efêmera)**: Focada puramente na sincronização em tempo real de mudanças na rede e em prover suporte a mecanismos locais rápidos como o "Undo" nativo do Y.js.
-2. **Trilha Semântica (Persistente)**: O histórico imutável e legível por humanos de eventos de negócio do sistema. Em vez de registrar "keystrokes" ou bytes brutos, armazena alterações lógicas de atributos do documento.
+A auditoria detalhada **emerge naturalmente** da combinação de duas fontes já inerentes ao modelo de dados:
 
-### 3.2 Estrutura Física de Armazenamento no SQLite
+1. A **DAG nativa do Automerge** (`Automerge.getHistory(doc)`) — que preserva cada Change com autor, timestamp e conteúdo exato da mutação, de forma imutável e criptograficamente encadeada dentro do documento.
+2. As **arestas `AUTHORED`** no grafo — que ligam cada nó-versão ao peer que consolidou o commit correspondente, carregando prova criptográfica de autoria.
 
-Para operacionalizar essas duas trilhas com eficiência de espaço e resiliência a crashes, o SQLite local gerencia quatro tabelas fundamentais:
+Essa convergência elimina a duplicação arquitetural e a necessidade de manter duas trilhas sincronizadas. O grafo *é* o audit trail.
 
-* **`snapshots`**: Guarda o estado binário consolidado do documento (`Y.encodeStateAsUpdate`) e o último `State Vector`.
-* **`yjs_updates`**: A janela deslizante (**Rolling Window**). Armazena os últimos $X$ updates binários brutos do Y.js para permitir ressincronização P2P acelerada e o "Undo" nativo do Y.js.
-* **`pending_staging`**: Área de estágio temporária. Registra de forma atômica as mudanças brutas capturadas pelo observador profundo do Y.js (`observeDeep`) antes de passarem pela consolidação semântica, evitando perda de dados se o browser for fechado inesperadamente.
-* **`audit_logs`**: O histórico imutável final. Contém JSONs legíveis estruturados, mapeando as alterações sob o seguinte formato:
+### 3.2 Payload da Aresta AUTHORED
 
-```json
-{
-  "id": "event_998abc",
-  "path": "sections[0].title",
-  "userId": "did:key:z6Mk...",
-  "before": "Título Antigo",
-  "after": "Título Novo",
-  "vector_clock": { "peer_alice": 12, "peer_bob": 8 },
-  "created_at": 1747123456789
-}
-```
+A aresta `AUTHORED` carrega um payload mínimo e verificável:
 
-### 3.3 O Fluxo Operacional de Escrita
+- **`change_hashes`**: lista dos hashes das Changes do Automerge incluídas neste commit e atribuídas a este autor (referência direta ao histórico `Automerge.getHistory(doc)`).
+- **`author_signature`**: assinatura Ed25519 do autor sobre o conjunto `H(change_hashes || nó-versão-id)` — prova de autoria sobre as mudanças exatas desta versão.
+- **`summary`**: sumário textual curto (ex: *"editou parágrafos 2–4, adicionou seção 3"*), gerado pelo Semantic Mapper no momento do commit. Serve como entrada de histórico legível sem exigir recálculo posterior.
 
-Toda alteração colaborativa segue este fluxo lógico:
+A aresta **não armazena** mapeamentos de antes/depois (`before`/`after`). Esses mapeamentos são calculados **sob demanda** pelo Semantic Mapper quando um usuário explicitamente navega pelo histórico ou solicita um diff semântico.
 
-1. **Edição**: O usuário altera a interface do documento (modificando nós ou propriedades).
-2. **Captura por Deep Observer**: O `observeDeep` do Y.js captura a alteração, identificando o caminho lógico (`path`) e o `delta`.
-3. **Commit Atômico Local**: O sistema grava simultaneamente o update binário correspondente do Y.js na tabela `yjs_updates` e insere o registro das alterações na tabela temporária `pending_staging`.
-4. **Coalescência Semântica**: O framework inicia uma janela temporal (janela default: 10 segundos). Modificações subsequentes do mesmo autor sobre a mesma propriedade acumulam e são agrupadas em memória para consolidar um único evento.
-   * **Regra de Quebra por Concorrência**: Se o **Vector Clock** contido no update recebido da rede indicar que outro usuário editou o mesmo nó/atributo concorrentemente, a coalescência é imediatamente interrompida. O agrupamento é quebrado e o conflito é gravado explicitamente em `audit_logs` para manter a rastreabilidade exata da divergência.
-5. **Consolidação e Limpeza**: Expirado o timeout de coalescência, o **Semantic Mapper** compila o diff final em formato legível, insere o registro na tabela `audit_logs` de forma persistente, e limpa os registros correspondentes da tabela `pending_staging`.
+### 3.3 Semantic Mapper (Lazy Diff)
 
-### 3.4 Recuperação, Compactação e Recursos Avançados
+O Semantic Mapper é um componente acionado sob demanda que calcula diffs estruturados entre duas versões de um documento colaborativo.
 
-* **Crash Recovery (Recuperação Pós-Falha)**: No startup de cada sessão do app, o `SyncWorker` escaneia a tabela `pending_staging`. Qualquer resíduo de edição inacabada da sessão anterior é imediatamente processado pelo `Semantic Mapper` e gravado na auditoria, eliminando lacunas de log causadas por fechamentos abruptos.
-* **Snapshotting e Rotação**: Quando um documento é fechado ou atinge um limite crítico de updates binários em `yjs_updates`, o sistema gera um novo snapshot consolidado via `Y.encodeStateAsUpdate`, grava na tabela `snapshots`, limpa os updates mais antigos de `yjs_updates` (mantendo apenas o buffer de undo de tamanho $X$), e reinicia o ciclo de sincronização.
-* **Undo Semântico**: Utilizando as informações históricas de `antes/depois` (valores `before` no JSON) na tabela `audit_logs`, o usuário consegue reverter campos específicos para estados passados no tempo, mesmo que o snapshot do Y.js já tenha descartado os deltas binários detalhados daquela alteração.
-* **Publicação "Shadow"**: Para exibição estática e pública de conteúdos colaborativos, o framework exporta a projeção limpa do `Y.Doc` para Markdown (`yText.toString()`) ou JSON estruturado (`yMap.toJSON()`), salvando o resultado em uma tabela de visualização pública separada da área de rascunhos.
+**Entradas:** dois identificadores do tipo `(entity_id, versão)`.
 
-### 3.5 Validação de Linhagem ao Receber
+**Algoritmo:**
+1. Carrega os documentos Automerge das duas versões via `Automerge.load(payload)` a partir dos nós na tabela `nodes`.
+2. Calcula o diff estruturado: campos alterados, valores antes/depois, paths JSON, operações de inserção/remoção em listas.
+3. Retorna JSON legível para renderização no engine `AuditTrail` da UI.
 
-Quando o peer recebe deltas de auditoria ou updates remotos da rede P2P:
-1. Verifica a assinatura criptográfica Ed25519 do autor do evento.
-2. Compara o `vector_clock` recebido contra o estado de causalidade local.
-3. Se houver divergências ou se o log apresentar assinaturas rompidas, a transação é gravada na tabela `audit_logs` com status de rejeição (`REJECTED`) para auditoria futura e descartada do estado ativo. Se estiver correto, o update é fundido na trilha CRDT e refletido na interface através da TinyBase.
+**Reidratação arqueológica:** Se a versão mais antiga tiver payload podado (`retention_state = 'pruned'`), o Semantic Mapper aciona o Graph-Based Routing para recuperar o snapshot Automerge do nó em peers compatíveis antes de calcular o diff. A UI exibe estado de carregamento durante o round-trip.
+
+**Geração de summary no commit:** O mesmo Semantic Mapper é invocado pelo Committer durante o ciclo de commit para gerar o campo `summary` da aresta `AUTHORED`, calculando o diff entre a versão anterior e o novo snapshot.
+
+### 3.4 Mecânica de Undo Entre Sessões
+
+A sequência imutável de nós-versão encadeados via `MUTATES` garante nativamente o Undo de longo prazo entre sessões.
+
+**Undo por Reconstrução Direta:** O sistema carrega o snapshot Automerge da versão alvo via `Automerge.load(payload)`, extrai o estado plano do documento naquele ponto temporal e emite um novo nó-versão com esse estado para a frente na linha do tempo — revertendo o documento sem adulterar o histórico imutável passado.
+
+**Undo quando payload podado:** Se o dispositivo local aplicou a política de GC e o payload do nó-versão foi podado (`retention_state = 'pruned'`), o Automerge Repo aciona Graph-Based Routing em background para recuperar o snapshot de peers compatíveis. Durante o round-trip, a UI exibe estado de reconstrução. Se a rede estiver indisponível, o Undo não pode ser completado e a UI informa o usuário com opção de tentar novamente quando online.
+
+### 3.5 Garantias de Auditoria
+
+- **Integridade histórica:** Hash chaining via `MUTATES.previous_hash` detecta adulteração retroativa de qualquer nó na cadeia de versões.
+- **Prova de autoria:** Assinaturas Ed25519 em nós-versão e no payload `author_signature` da aresta `AUTHORED` provam criptograficamente quem criou cada commit.
+- **Rastreabilidade granular:** `Automerge.getHistory(doc)` fornece rastreabilidade Change-a-Change para edições colaborativas, correlacionável com as arestas `AUTHORED` por hash de Change.
+- **Apresentabilidade jurídica:** Os hashes das Changes assinados pelo autor constituem prova criptográfica de autoria apresentável em contextos de auditoria regulatória. A trilha é imutável, pública dentro do escopo de capability, e não requer custódia central.
 
 ---
 
@@ -1090,6 +1289,153 @@ Audit trail tem regras de retenção próprias:
 - Por padrão, **nunca expurgado** (princípio de imutabilidade do passado).
 - Em domínios fiscais/regulados, retenção legal forçada (5+ anos).
 - Em domínios casuais, pode ter retenção mais curta (chat: trail de mensagens segue retenção das mensagens).
+
+---
+
+## 14. Arquitetura de Onboarding Seguro por Acolhimento Causal
+
+O onboarding seguro é um requisito arquitetural crítico: um dispositivo novo não pode simplesmente criar nós no grafo global sem validação prévia, pois isso abriria brechas para identidades forjadas, ocupação de `entity_id`s alheios e injeção de dados maliciosos. A plataforma adota o padrão de **Acolhimento Causal** gerenciado por um Agente de Sistema (`PROFILE:SYSTEM`) rodando em um Super Peer confiável.
+
+### 14.1 Princípio: O Dispositivo Não Publica Diretamente
+
+Durante o onboarding, o dispositivo local é tratado como entidade não-autenticada. Ele gera o par de chaves Ed25519 (a chave mestra futura) localmente, mas **não publica nenhum nó no grafo global** antes de receber validação do Agente de Acolhimento.
+
+Isso evita:
+- *Bootstrap race conditions*: dois dispositivos tentando criar o mesmo `PROFILE:AUTHENTICATION` com chaves distintas.
+- *Sybil attacks em massa*: identidades criadas em lote sem verificação humana ou prova de intenção.
+- *Corrupção do grafo*: nós mal-formados oriundos de clientes bugados ou adversariais que não passaram pelo ciclo de validação canônico.
+- *Vazamento prematuro de chave pública*: a `pub_key` do dispositivo não fica exposta na rede antes de estar vinculada a um `PROFILE:AUTHENTICATION` legitimamente emitido.
+
+### 14.2 Fluxo de Acolhimento Causal
+
+#### Fase 1 — Geração Local de Par de Chaves (Off-line)
+
+```
+[Dispositivo Local — sem conexão com a rede ainda]
+
+(ChavePrivada, ChavePublica) ← Ed25519.generateKeyPair()
+ChavePrivada → armazenada no Secure Enclave / Keychain / OPFS criptografado
+ChavePublica → será enviada na requisição de acolhimento
+```
+
+A chave privada **jamais é transmitida** para qualquer peer em qualquer etapa do fluxo.
+
+#### Fase 2 — Envio do CONTENT:MESSAGE:ONBOARDING_REQUEST
+
+O dispositivo cria e envia ao Super Peer um nó de requisição de acolhimento. Como não há chave de época ainda, o payload viaja em texto plano (ou sob TLS do canal WebRTC), assinado pela chave privada local para provar posse:
+
+```
+Nó CONTENT:MESSAGE criado:
+  type: "CONTENT:MESSAGE"
+  subtype: "ONBOARDING_REQUEST"
+  payload (texto plano ou TLS do canal):
+    candidate_pub_key: <ChavePublica do dispositivo>
+    network_id:        <identificador da rede de destino>
+    invitation_token:  <token de convite, se exigido pela rede>
+    device_info:       { platform, app_version, timestamp_ms }
+    self_signature:    Ed25519.sign(
+                         hash(candidate_pub_key || network_id || timestamp_ms),
+                         ChavePrivada
+                       )
+                       ← prova que o dispositivo controla a ChavePrivada
+                         correspondente à candidate_pub_key, sem revelar a chave
+
+Aresta DIRECTED_TO:
+  source_id: <id do CONTENT:MESSAGE>
+  target_id: <entity_id do PROFILE:SYSTEM Agente de Acolhimento>
+```
+
+A `self_signature` inclui `timestamp_ms` e `network_id` para prevenir replay attacks: a mesma requisição não pode ser reutilizada em outra rede ou em momento posterior.
+
+#### Fase 3 — Validação pelo Agente de Acolhimento (PROFILE:SYSTEM)
+
+O Super Peer recebe o `CONTENT:MESSAGE:ONBOARDING_REQUEST` e o Agente de Acolhimento executa:
+
+1. **Verificação da `self_signature`**: confirma que o dispositivo controla a chave privada correspondente à `candidate_pub_key`.
+2. **Verificação de unicidade da chave pública**: `candidate_pub_key` não pode estar associada a nenhum `PROFILE:AUTHENTICATION` existente na rede (prevenção de reutilização de chaves comprometidas).
+3. **Verificação do `invitation_token`** (se a rede exigir): token válido, não expirado, não consumido por outro onboarding.
+4. **Verificação de quotas e políticas da rede**: `SPECIFICATION:NETWORK_GOVERNANCE` pode limitar taxa de onboarding (rate limiting), exigir KYC, ou restringir por tipo de convite.
+5. **Verificação de sanidade de `device_info`**: versão mínima do app suportada, plataforma permitida.
+
+Se qualquer verificação falha: o Agente emite `CONTENT:MESSAGE` (subtipo `ONBOARDING_REJECTED`) com motivo estruturado, via aresta `REPLIES_TO` apontando para o `CONTENT:MESSAGE` original.
+
+#### Fase 4 — Emissão e Assinatura do PROFILE:AUTHENTICATION pelo Agente
+
+Se a validação passa, o Agente de Acolhimento emite **atomicamente** e assina o grafo de identidade inicial:
+
+```
+[Emitido e assinado pelo PROFILE:SYSTEM Agente de Acolhimento]
+
+Nó PROFILE:AUTHENTICATION criado:
+  id: "01J2X3Y4Z5N..."  (11º char = 'N')
+  entity_id: <novo ULID estável — identidade permanente na rede>
+  type: "PROFILE:AUTHENTICATION"
+  pub_key: <candidate_pub_key do dispositivo>
+  payload (criptografado com chave de época da rede):
+    network_id:         <id da rede>
+    onboarded_at:       <unix_ms>
+    onboarding_agent:   <entity_id do Agente de Acolhimento>
+    invitation_origin:  <hash do invitation_token, se aplicável>
+  signature: <Ed25519 do Agente de Acolhimento>  ← autentica a criação
+
+Aresta AUTHORED:
+  source_id: <entity_id do Agente de Acolhimento>
+  target_id: <id do PROFILE:AUTHENTICATION>
+
+Aresta PARTICIPATES_IN:
+  source_id: <id do PROFILE:AUTHENTICATION>
+  target_id: <entity_id da NETWORK_ROOT>
+
+Nó ASSET:CAPABILITY (capabilities de Onda 0):
+  [capabilities mínimas — leitura de conteúdo público, criação de PROFILE:PERSONA]
+
+Aresta DELEGATED_TO:
+  source_id: <id do ASSET:CAPABILITY>
+  target_id: <id do PROFILE:AUTHENTICATION>
+
+CONTENT:MESSAGE de resposta (subtipo: ONBOARDING_ACCEPTED):
+  payload: { auth_entity_id: <entity_id do novo PROFILE:AUTH>, epoch_key_hint: ... }
+  assinado pelo Agente de Acolhimento
+
+Aresta REPLIES_TO:
+  source_id: <id do CONTENT:MESSAGE:ONBOARDING_ACCEPTED>
+  target_id: <id do CONTENT:MESSAGE:ONBOARDING_REQUEST original>
+```
+
+#### Fase 5 — Replicação do Grafo de Onboarding para o Peer Local
+
+O Super Peer replica o sub-grafo resultante — `PROFILE:AUTHENTICATION`, suas arestas de vínculo, as capabilities iniciais e a mensagem de aceite — de volta ao dispositivo do usuário via Automerge Repo/WebRTC. O dispositivo recebe seu nó de identidade já vinculado à rede, assinado por uma autoridade confiável, e pode então operar como peer autenticado.
+
+A partir deste ponto, o dispositivo usa sua chave privada local para assinar operações, e os demais peers da rede verificam a autenticidade contra a `pub_key` do `PROFILE:AUTHENTICATION` persistido no grafo.
+
+### 14.3 Propriedades de Segurança do Protocolo
+
+**Privacidade da chave privada:** a chave privada jamais é transmitida. Apenas `candidate_pub_key` e a `self_signature` trafegam. Comprometer o canal de comunicação não expõe a chave privada do usuário.
+
+**Causalidade verificável:** o `PROFILE:AUTHENTICATION` foi criado *por* um agente confiável *em resposta a* uma requisição específica. A aresta `AUTHORED` e o par `ONBOARDING_REQUEST` ↔ `ONBOARDING_ACCEPTED` (ligados por `REPLIES_TO`) registram isso imutavelmente no grafo.
+
+**Não-forjabilidade:** o Agente de Acolhimento assina o `PROFILE:AUTHENTICATION` com sua própria chave (do Super Peer). Qualquer peer da rede pode verificar que este perfil foi legitimamente emitido, sem depender de um servidor de verificação central separado.
+
+**Proteção contra replay:** a `self_signature` cobre `timestamp_ms` e `network_id`. Reutilizar a mesma requisição em outra rede ou após o timestamp expirar falha na verificação do Agente.
+
+**Auditabilidade completa:** toda concessão de identidade é rastreável via o par de `CONTENT:MESSAGE` imutáveis no grafo. Auditorias podem verificar *quando*, *por quem* e *sob qual invitation_token* cada `PROFILE:AUTH` foi criado.
+
+### 14.4 Variações por Modalidade de Rede
+
+**Rede pública:**
+O Agente de Acolhimento é o `PROFILE:SYSTEM` do fundador. Políticas definidas pela `SPECIFICATION:NETWORK_GOVERNANCE` (ex: cadastro livre, por convite, com KYC). Taxa de onboarding pode ser limitada para prevenir ataques de criação em massa.
+
+**Rede corporativa whitelabel:**
+O Agente de Acolhimento é integrado ao sistema de SSO/LDAP da empresa (materializado como `PROFILE:SYSTEM`). O `PROFILE:AUTHENTICATION` é provisionado com base no registro do funcionário no AD/Okta; o `invitation_token` é substituído pelo token de SSO da empresa. O `CONTENT:PERSONAL_DATA` do funcionário pode ser pré-preenchido a partir do diretório corporativo durante o onboarding.
+
+**Rede P2P pura:**
+Não há Super Peer central. O bootstrap ocorre por convite direto de peer existente: o peer convidante assume o papel de Agente de Acolhimento local, assina o `PROFILE:AUTH` do novo membro com sua própria chave. O modelo de confiança é transitivo (confio no membro A que acolheu B, portanto B tem presença no meu grafo). O onboarding P2P puro é comunicado explicitamente ao usuário: a identidade não tem validação de autoridade central; é tão confiável quanto o peer que a acolheu.
+
+### 14.5 Relação com o Modelo de Recuperação de Acesso (Seção 9)
+
+O processo de onboarding por Acolhimento Causal é **estruturalmente idêntico** ao processo de recuperação de acesso descrito na Seção 9: em ambos os casos, um dispositivo sem identidade ativa solicita ao Super Peer que emita ou reative um `PROFILE:AUTHENTICATION`. A diferença semântica está no subtipo do `CONTENT:MESSAGE` (`ONBOARDING_REQUEST` vs. `RECOVERY_REQUEST`) e nas verificações adicionais do Agente (ex: verificação Shamir em recuperação, verificação de invitation_token e unicidade de chave em onboarding).
+
+Este design unificado elimina código de caminho especial: o mesmo mecanismo de mensageria baseado em nós, o mesmo agente, o mesmo protocolo criptográfico, aplicado a dois contextos operacionais semanticamente distintos mas mecanicamente equivalentes.
 
 ---
 

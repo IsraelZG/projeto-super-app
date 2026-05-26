@@ -93,6 +93,40 @@ Implementação visual do Princípio 2.3 do Documento 1: em layouts multi-coluna
 - Sincronização de dados é por persona+rede, então colunas com personas diferentes não interferem.
 - Drag-and-drop entre colunas respeita capabilities de cada persona.
 
+### 2.6 Princípio do Contexto Emergente do Grafo
+
+A UI não navega por endereços de pasta rígidos nem por caminhos hierárquicos fixos. Não existem construtos do tipo `/projetos/alfa/documentos/` mapeados como estrutura de armazenamento — o grafo não é um filesystem.
+
+O **contexto** de uma tela (ex: *"sala de chat do time Alpha"*, *"pasta de contratos do Projeto X"*) é calculado **dinamicamente** pela UI através de uma query estruturada local — uma CTE recursiva sobre as tabelas SQLite locais, baseada no predicado de pertencimento declarado na SPECIFICATION do contexto.
+
+**Exemplo para o contexto "Projeto X":**
+
+```sql
+WITH RECURSIVE context AS (
+  SELECT n.*
+  FROM nodes n
+  JOIN edges e ON e.target_id = n.entity_id
+  WHERE e.type LIKE 'PARTICIPATES_IN:PROJECT%'
+    AND e.source_id = <persona_entity_id>
+  UNION ALL
+  SELECT n.*
+  FROM nodes n
+  JOIN edges e ON e.source_id = context.entity_id
+  WHERE e.type IN ('OWNS', 'GOVERNS', 'INTERACTS:CONTENT:CREATED')
+)
+SELECT * FROM context
+WHERE type LIKE 'CONTENT:%';
+```
+
+O resultado dessa query **é** o contexto — dinâmico, consistente com o grafo local, recalculado automaticamente conforme arestas evoluem. Não há operação de "mover arquivo" ou "reorganizar pasta": alterar uma aresta `PARTICIPATES_IN` reposiciona o item em todos os contextos que o incluem.
+
+**Implicações para o design de UI:**
+
+- Cada engine de módulo recebe um `contextSpec` — a declaração de qual CTE deve ser executada para compor seu conteúdo.
+- O módulo de navegação não gerencia uma árvore de pastas; gerencia um conjunto de `contextSpec`s ativos.
+- A busca full-text e os filtros operam sobre o resultado da CTE, não sobre uma hierarquia.
+- Um item pode pertencer a múltiplos contextos simultaneamente, sem cópias — apenas arestas distintas.
+
 ---
 
 ## 3. Sistema de Temas
@@ -533,7 +567,7 @@ Visualizam estado e fluxo.
 
 **StateMachine** — Renderiza máquina de estados em múltiplos layouts: Stepper horizontal, Tracker vertical, Kanban com colunas arrastáveis. SPECIFICATION declara estados e transições; engine renderiza. Validação de transições integrada com Validador de Domínio. Casos: checkout multi-step, tracking logístico, funil CRM, wizard de cadastro, BPMN simples.
 
-**AuditTrail** — Especialização para visualização da Linhagem de Versões MFA-S. Renderiza eventos com diff semântico, badges de assinatura, indicador de Linhagem de Versões. Suporta time-travel (visualizar estado em momento anterior). Casos: histórico de documento, auditoria de transação, log de mudanças de role, governança de specifications.
+**AuditTrail** — Consome diretamente `Automerge.getHistory(doc)` cruzado com as arestas `AUTHORED` (Opção B) para reconstruir a linha do tempo de edições de um documento colaborativo. Renderiza eventos com diff semântico calculado via Semantic Mapper **sob demanda** (lazy) — não pré-computados. Exibe badges de assinatura Ed25519 por commit e indicador de Linhagem de Versões via cadeia `MUTATES`. Suporta time-travel (visualizar estado em momento anterior). Para documentos cujo payload foi podado (`retention_state = 'pruned'`), aciona Automerge Repo para reconstrução em background via Graph-Based Routing antes de renderizar o diff solicitado. Casos: histórico de documento, auditoria de transação, log de mudanças de role, governança de specifications.
 
 ### 7.6 Engines Especializadas
 
@@ -779,6 +813,8 @@ O usuário deve **saber** o estado de sincronização sem ser **distraído** por
 
 **Erro de sync persistente**: notificação não-modal, ação para tentar novamente.
 
+**UX de Reidratação Arqueológica:** Quando o usuário navega pelo painel de histórico de revisões e solicita a visualização ou o Undo de uma versão cujo payload foi podado (`retention_state = 'pruned'`), o Automerge Repo aciona o Graph-Based Routing em background para buscar o snapshot Automerge do nó-versão em peers compatíveis. Durante esse round-trip, a UI exibe shimmers/skeletons com a mensagem contextual: *"Reconstruindo estado histórico do documento na rede..."*. Caso a rede esteja indisponível, a UI exibe o estado de erro semântico com opção de tentar novamente — não há fallback automático para reversão baseada em log, pois o modelo de auditoria é integralmente baseado no snapshot Automerge.
+
 ### 11.3 UX de Busca Federada (Two-Tier)
 
 Quando usuário busca conteúdo via Entity Picker ou Command Palette:
@@ -807,6 +843,137 @@ Para conteúdo sensível (transações, contratos, comunicações importantes), 
 - ✅ Verificado: assinatura válida, linhagem íntegra.
 - ⚠️ Não verificado: assinatura ausente ou pendente.
 - 🔴 Suspeito: linhagem rompida, assinatura inválida.
+
+### 11.6 Hooks Reativos para Saldo via entity_heads e Renderização Dinâmica pelo 11º Caractere
+
+#### 11.6.1 Leitura de Saldo via entity_heads (O(1))
+
+O saldo financeiro — e qualquer estado encabeçado por um nó `ASSET:BALANCE_STATE` — é consultado pelo TinyBase exclusivamente via a tabela local não-replicável `entity_heads`, que aponta para a "cabeça" vigente da linhagem de cada entidade. Hooks de UI **nunca** recalculam saldo varrendo a Linhagem de Versões em tempo de renderização: esse cálculo seria O(n) e seria inconsistente com o modelo reativo de 60fps da plataforma.
+
+**Hook canônico de saldo:**
+
+```typescript
+// Leitura de saldo em O(1) via entity_heads
+// entity_heads é atualizada por Trigger SQLite a cada novo ASSET:BALANCE_STATE inserido
+function useBalanceState(entityId: string) {
+  // Obtém o head_id vigente a partir de entity_heads
+  const headId = useCell('entity_heads', entityId, 'head_id');
+
+  // Com o head_id, lê o payload já descriptografado do nó de saldo corrente
+  const balanceNode = useRow('nodes_cache', headId ?? '');
+
+  return {
+    balance:   balanceNode?.payload?.balance   ?? null,
+    currency:  balanceNode?.payload?.currency  ?? null,
+    headId,
+    isLoading: headId === undefined,
+  };
+}
+```
+
+O componente re-renderiza automaticamente quando o Trigger SQLite atualiza `entity_heads` após uma nova aresta `MUTATES` introduzir um nó `ASSET:BALANCE_STATE` mais recente — seja originado localmente (Optimistic UI) ou confirmado pelo Validador remoto e replicado via Automerge Repo.
+
+**Integração com Optimistic UI para ações financeiras pendentes:**
+
+```typescript
+function useBalanceWithOptimism(entityId: string) {
+  const confirmed = useBalanceState(entityId);
+
+  // pending_intents é populado pelo TinyBase enquanto a intenção aguarda validação
+  const pendingDelta = usePendingIntentDelta(entityId);
+
+  return {
+    ...confirmed,
+    // Exibe saldo projetado durante o período de validação remota
+    displayBalance: pendingDelta !== null
+      ? (confirmed.balance ?? 0) + pendingDelta.expectedDelta
+      : confirmed.balance,
+    isPending: pendingDelta !== null,
+  };
+}
+```
+
+Quando o Validador confirma ou rejeita a intenção, `entity_heads` é atualizado e a projeção otimista é substituída automaticamente pelo saldo real.
+
+#### 11.6.2 Roteamento Dinâmico pelo 11º Caractere para Renderização Polimórfica
+
+Quando a UI precisa renderizar o destino de uma aresta (por exemplo, o `target_id` de uma aresta `RESULTED_FROM`, `WITNESSED_BY` ou `RESOLVED_BY`), ela usa o **11º caractere (index 10)** do ULID para decidir, em O(1) e sem lógica condicional por tipo de aresta, de qual tabela carregar o dado.
+
+**Hook de resolução polimórfica de target_id:**
+
+```typescript
+// Resolve target_id para nó ou aresta usando o 11º caractere do ULID
+function useTargetEntity(targetId: string | undefined) {
+  const targetTable = useMemo(() => {
+    if (!targetId || targetId.length < 11) return null;
+    const typeChar = targetId[10]; // index 10 = 11º caractere
+    if (typeChar === 'N') return 'nodes_cache';
+    if (typeChar === 'E') return 'edges_cache';
+    return null; // ULID malformado — não deve ocorrer em dados válidos
+  }, [targetId]);
+
+  const entity = useRow(targetTable ?? '', targetId ?? '');
+
+  return {
+    entity,
+    targetTable,
+    isNode: targetTable === 'nodes_cache',
+    isEdge: targetTable === 'edges_cache',
+  };
+}
+```
+
+**Componente genérico de renderização de destino de aresta:**
+
+```typescript
+// Renderiza o destino de qualquer aresta — nó ou aresta — sem switch-case por tipo
+function EdgeTargetRenderer({ targetId }: { targetId: string }) {
+  const { entity, isNode, isEdge } = useTargetEntity(targetId);
+
+  if (!entity) return <Skeleton />;
+
+  if (isNode) {
+    // Destino é um nó — renderiza conforme o type do nó (PROFILE, CONTENT, ASSET, SPECIFICATION)
+    return <NodeRenderer node={entity} />;
+  }
+
+  if (isEdge) {
+    // Destino é uma aresta — renderiza aresta
+    // Caso canônico: WITNESSED_BY → TRANSFERRED_TO, ou RESULTED_FROM → TRANSFERRED_TO
+    return <EdgeRenderer edge={entity} />;
+  }
+
+  return null;
+}
+```
+
+Este padrão permite que engines genéricas (`AuditTrail`, `RelationGraph`, `ExtractTimeline`) trabalhem com o grafo polimórfico sem adapter por tipo de aresta, tornando a renderização de relações heterogêneas — arestas apontando para outras arestas — correta e eficiente por construção.
+
+#### 11.6.3 Rastreamento Causal via RESULTED_FROM na UI do Extrato
+
+Componentes de extrato financeiro usam a aresta `RESULTED_FROM` para navegar do nó de saldo atual diretamente à transação que o originou, sem varredura da Linhagem de Versões:
+
+```typescript
+function useBalanceOrigin(balanceNodeId: string) {
+  // Busca a aresta RESULTED_FROM que parte deste nó de saldo
+  const resultedFromEdges = useQuery('edges_cache', {
+    filter: { source_id: balanceNodeId, type: 'RESULTED_FROM' },
+    limit: 1,
+  });
+
+  const resultedFromEdge = resultedFromEdges?.[0];
+
+  // target_id tem 11º char = 'E' → aponta para aresta TRANSFERRED_TO
+  const { entity: causalEdge, isEdge } = useTargetEntity(resultedFromEdge?.target_id);
+
+  return {
+    causalEdge:       isEdge ? causalEdge : null,
+    resultedFromEdge: resultedFromEdge ?? null,
+  };
+}
+```
+
+Isso permite que a UI do extrato exiba, ao lado de cada linha de saldo, um botão "Ver transação" que navega diretamente para a aresta `TRANSFERRED_TO` responsável — funcionalidade que existe na maioria dos aplicativos financeiros modernos, aqui implementada nativamente pelo grafo sem dados desnormalizados extras.
 
 ---
 
@@ -882,7 +1049,7 @@ plataforma-v3/
 ├── core/
 │   ├── engines/       # Engines base reusáveis
 │   ├── design-system/ # Componentes shadcn-based + tokens
-│   ├── data-layer/    # SQLite, TinyBase, Y.js providers
+│   ├── data-layer/    # SQLite, TinyBase, Automerge Repo providers
 │   ├── crypto/        # Criptografia, KMS, UCAN
 │   ├── routing/       # Graph-Based Routing
 │   ├── validators/    # Validador de Domínio + mecanismos

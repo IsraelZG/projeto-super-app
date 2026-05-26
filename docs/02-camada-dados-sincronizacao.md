@@ -15,63 +15,52 @@
 5. [Estados de Retenção e Ciclo de Vida](#5-estados-de-retenção-e-ciclo-de-vida)
 6. [Graph-Based Routing](#6-graph-based-routing)
 7. [Modelo de Sincronização em Ondas](#7-modelo-de-sincronização-em-ondas)
-8. [Replicação Coordenada e Replication Factor](#8-replicação-coordenada-e-replication-factor)
-9. [Snapshots e Bootstrap Acelerado](#9-snapshots-e-bootstrap-acelerado)
-10. [Hierarquia Criptográfica e Forward Secrecy](#10-hierarquia-criptográfica-e-forward-secrecy)
-11. [Cache Volátil e Modos de Acesso](#11-cache-volátil-e-modos-de-acesso)
-12. [Web Workers e Processamento em Background](#12-web-workers-e-processamento-em-background)
-13. [Performance e Tier-Aware Degradation](#13-performance-e-tier-aware-degradation)
-14. [Quotas de Storage e Garbage Collection](#14-quotas-de-storage-e-garbage-collection)
+8. [Protocolo de Sincronização de Dados Estruturados](#8-protocolo-de-sincronização-de-dados-estruturados)
+9. [Replicação Coordenada e Replication Factor](#9-replicação-coordenada-e-replication-factor)
+10. [Snapshots de Bootstrap e Reidratação](#10-snapshots-de-bootstrap-e-reidratação)
+11. [Hierarquia Criptográfica e Forward Secrecy](#11-hierarquia-criptográfica-e-forward-secrecy)
+12. [Cache Volátil e Modos de Acesso](#12-cache-volátil-e-modos-de-acesso)
+13. [Web Workers e Processamento em Background](#13-web-workers-e-processamento-em-background)
+14. [Performance e Tier-Aware Degradation](#14-performance-e-tier-aware-degradation)
+15. [Quotas de Storage e Garbage Collection](#15-quotas-de-storage-e-garbage-collection)
 
 ---
 
 ## 1. Visão Geral da Camada de Dados
 
-A camada de dados da plataforma é construída sobre quatro componentes lógicos que cooperam de forma estritamente definida:
+A camada de dados da plataforma coopera de forma estritamente definida através do seguinte pipeline de captura, commit e projeção local. O modelo distingue dois domínios: **documentos colaborativos** (gerenciados pelo Automerge Repo) e **dados estruturados do grafo** (nós e arestas nas tabelas `nodes`/`edges`).
 
-- **SQLite WASM/OPFS** — fonte de verdade persistente no dispositivo. Contém apenas duas tabelas físicas replicáveis (`nodes` e `edges`) e tabelas auxiliares locais não-replicáveis.
-- **Y.js (CRDT)** — motor de sincronização P2P. Calcula deltas, resolve conflitos em domínios colaborativos, propaga mudanças entre peers.
-- **Sync Worker** — componente isolado em background que sincroniza deltas P2P (Y.js) e escreve diretamente no SQLite para máxima performance.
-- **Triggers SQLite** — mantêm as projeções estruturais permanentes e índices auxiliares de forma automática e reativa no disco.
-- **TinyBase** — camada reativa em memória que atua como *consumidora* das projeções estruturais e *gestora* de projeções modulares efêmeras na RAM, expondo APIs reativas para a UI.
-- **WebRTC** — canal de transporte entre peers, com signaling via Cloud da plataforma ou trackers federados.
+**1. Captura de Changes (A Escrita Local):** Quando a UI edita um documento colaborativo via Automerge Repo, as Changes são capturadas pelo Sync Worker na RAM e persistidas atomicamente na tabela local não-replicável `pending_changes` (durabilidade local pré-commit). Enquanto as Changes estão em `pending_changes`, o Automerge Repo propaga-as como **ephemeral messages** via WebRTC para peers co-editores, garantindo feedback visual em tempo real sem inserir registros no grafo imutável.
 
-A separação de responsabilidades é vinculativa:
+**2. Gatilho de Commit (A Decisão):** O Sync Worker monitora o acúmulo de Changes. Ao atingir o gatilho — heurística de inatividade (ex: 3 segundos sem novas edições) ou limiar de operações acumuladas configurável pela SPECIFICATION —, o ciclo de commit é disparado.
 
-- A **UI nunca lê do SQLite diretamente.** Sempre via TinyBase, que oferece reatividade granular (re-render apenas quando dados consumidos mudam).
-- O **SQLite recebe escritas** através do TinyBase (dados vindos da UI local) e através do Sync Worker (dados recebidos da rede externa via Y.js).
-- O **Y.js e a rede P2P** operam isolados no Sync Worker, garantindo que o volume de sincronização não gere gargalos na Main Thread (UI).
-- A **encriptação acontece em camada dedicada**, antes de payload entrar no SQLite e antes de delta sair pelo WebRTC.
+**3. Consolidação em Nó-Versão Imutável (O Commit):** O Committer designado (modos detalhados no Documento 3) consolida todas as Changes pendentes em um único `Automerge.save(doc)` — um snapshot binário integral e autossuficiente — que torna-se o `payload` do novo nó-versão. O nó é assinado pelo Committer com Ed25519, ligado ao nó anterior por aresta `MUTATES`, e inserido na tabela replicável `nodes` via operação append-only.
 
-Esta arquitetura permite que cada componente seja substituído ou otimizado independentemente sem rewrites massivos, e isola as responsabilidades de forma testável.
+**4. Atualização de Projeções Locais (A Âncora):** Triggers SQLite detectam o novo nó inserido e atualizam imediatamente a tabela local `entity_heads`, apontando o `head_id` da entidade para o novo nó-versão. O TinyBase observa `entity_heads` e re-renderiza a UI de forma reativa sem recalcular a Linhagem de Versões em tempo de renderização.
 
-### 1.1 Fluxo Canônico de Escrita
+**5. Limpeza e Poda Segura (A Economia):** Após confirmação do commit, as Changes correspondentes são removidas de `pending_changes`. O Garbage Collector (G4) pode, sob critérios de pressão de storage, podar o `payload` de nós intermediários anteriores na tabela `nodes` — zerando o campo e marcando `retention_state = 'pruned'` — sem violar a topologia do grafo global. O nó-versão atual (head) **nunca é podado enquanto for o head vigente**.
+
+**6. Sync de Dados Estruturados do Grafo (O Peer-to-Peer):** Para nós/arestas fora de documentos colaborativos, o Sync Worker usa **Range-Based Set Reconciliation** com peers autorizados, identificando divergências de forma sub-linear por fingerprints XOR sobre B-tree em memória. Detalhamento na Seção 8.
 
 ```
-UI → TinyBase → SQLite (tabelas `nodes` e `edges`)
-  ↓ (via Triggers nativos)
-  ├─ Atualiza Projeções Estruturais (`entity_heads`, `active_edges`, etc.)
-  └─ TinyBase observa as projeções e atualiza a UI reativamente
-```
-
-### 1.2 Fluxo Canônico de Leitura
-
-```
-UI subscreve → TinyBase Query → 
-  ↓
-  ├─ Cache em memória (hit: retorno imediato)
-  └─ SQLite (miss: hidrata cache, retorna)
-```
-
-### 1.3 Fluxo Canônico de Recepção P2P
-
-```
-WebRTC delta → Provider Y.js → Y.js Document (merge CRDT no Sync Worker) → 
-  ↓
-  ├─ Sync Worker / Validador (verifica assinatura, capability) → 
-  │   ├─ Aceito: Sync Worker escreve direto em SQLite → Triggers atualizam projeções → TinyBase na Main Thread é notificado e recarrega
-  │   └─ Rejeitado: registra REJECTED edge para auditoria, descarta payload
-  └─ Cache de chaves: Web Worker de UI descriptografa on-demand (Lazy Decryption)
+[Pipeline de Commit Colaborativo]
+Edição UI ──> Automerge Repo ──> pending_changes (RAM + SQLite local)
+                    │
+              Ephemeral messages via WebRTC → co-editores (feedback em tempo real)
+                    │
+              [Gatilho de commit: inatividade ou limiar de Changes]
+                    │
+                    ▼
+        Committer: Automerge.save(doc) → payload do nó-versão
+                    │
+                    ▼
+        Novo nó-versão em 'nodes' (assinado + aresta MUTATES)
+                    │
+        Trigger SQLite → entity_heads atualizado
+                    │
+        TinyBase re-renderiza UI em O(1)
+                    │
+        GC limpa pending_changes; pode podar nós intermediários
 ```
 
 ---
@@ -82,8 +71,8 @@ WebRTC delta → Provider Y.js → Y.js Document (merge CRDT no Sync Worker) →
 
 ```sql
 CREATE TABLE nodes (
-  id TEXT PRIMARY KEY,            -- ULID (versão única)
-  entity_id TEXT NOT NULL,        -- ULID (identificador da linhagem de versões)
+  id TEXT PRIMARY KEY,            -- ULID com 11º caractere (index 10) fixado em 'N' (Node)
+  entity_id TEXT NOT NULL,        -- ULID com 11º caractere 'N'; identificador estável da linhagem
   type TEXT NOT NULL,             -- "PROFILE:PERSONA", "CONTENT:POST", etc.
   pub_key TEXT,                   -- Chave pública do criador (NULL para nós sem autoria explícita)
   payload BLOB,                   -- Encriptado com AES-256-GCM (chave de época)
@@ -95,20 +84,24 @@ CREATE TABLE nodes (
 );
 
 CREATE TABLE edges (
-  id TEXT PRIMARY KEY,            -- ULID
-  entity_id TEXT NOT NULL,        -- ULID (linhagem da aresta, se aplicável)
-  source_id TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  type TEXT NOT NULL,             -- "AUTHORED", "MEMBER_OF", "TRANSFERRED_TO", etc.
+  id TEXT PRIMARY KEY,            -- ULID com 11º caractere (index 10) fixado em 'E' (Edge)
+  entity_id TEXT NOT NULL,        -- ULID com 11º caractere 'E'; linhagem da aresta, se aplicável
+  source_id TEXT NOT NULL,        -- ULID com 11º char 'N': sempre referencia nodes(id)
+  target_id TEXT NOT NULL,        -- Polimórfico: 11º char 'N' → nodes(id); 'E' → edges(id)
+                                  -- Virtual Foreign Key (VFK) aplicada pela camada de aplicação
+  type TEXT NOT NULL,             -- "AUTHORED", "PARTICIPATES_IN", "TRANSFERRED_TO", etc.
   payload BLOB,                   -- Metadados encriptados (peso, timestamp interno, etc.)
   payload_iv BLOB,
   epoch INTEGER NOT NULL,
   weight REAL DEFAULT 1.0,        -- Em texto plano (não-sensível); usado em ASSETs
   created_at INTEGER NOT NULL,
   signature BLOB,
-  retention_state TEXT NOT NULL DEFAULT 'integral',
-  FOREIGN KEY(source_id) REFERENCES nodes(id),
-  FOREIGN KEY(target_id) REFERENCES nodes(id)
+  retention_state TEXT NOT NULL DEFAULT 'integral'
+  -- 'integral' | 'pruned' | 'expunged' | 'orphan'
+  -- 'orphan': target ou source ainda não disponível localmente; aguarda reidratação P2P
+  -- Sem FOREIGN KEY físicas: target_id é polimórfico (aponta para nodes OU edges).
+  -- VFK usa o 11º char do target_id para resolver a tabela-alvo em O(1) sem joins.
+  -- source_id sempre referencia nodes(id) — todo relacionamento parte de um nó.
 );
 
 CREATE INDEX idx_nodes_type ON nodes(type);
@@ -130,21 +123,21 @@ CREATE INDEX idx_edges_type ON edges(type);
 
 **Sem `updated_at`:** o sistema é append-only (Princípio 2.7). Mudanças geram novos nós com aresta `MUTATES`.
 
+**Virtual Foreign Keys (VFK) em `target_id` da tabela `edges`:** a coluna `target_id` é deliberadamente polimórfica — pode referenciar linhas em `nodes` (caso comum: aresta aponta para um nó) ou em `edges` (caso especial: aresta aponta para outra aresta, ex: `WITNESSED_BY` testemunhando uma aresta `TRANSFERRED_TO`, ou `RESULTED_FROM` ligando um nó de saldo à aresta de transferência que o causou). O SQLite não suporta Foreign Keys condicionais que referenciam tabelas diferentes. A solução é eliminar as FK físicas em `target_id` e aplicar as **Virtual Foreign Keys** na camada de aplicação (Sync Worker, TinyBase, Validador de Domínio), usando o **11º caractere (index 10)** do ULID para resolver a tabela-alvo em O(1): `'N'` → `nodes(id)`, `'E'` → `edges(id)`. O `source_id` **sempre** referencia `nodes(id)` — todo relacionamento parte de um nó — e mantém a semântica de FK convencional.
+
+**Estado `'orphan'` no `retention_state`:** quando uma aresta (ou nó) chega via replicação P2P, mas o registro referenciado em `source_id` ou `target_id` ainda não está disponível localmente, o registro é inserido com `retention_state = 'orphan'`. O sistema usa o 11º caractere do ID ausente para saber em qual tabela (`nodes` ou `edges`) deve solicitar o pai faltante via Graph-Based Routing. Uma vez que o pai chega e é inserido, um Trigger SQLite atualiza o `retention_state` do órfão para `'integral'`. Isso garante consistência eventual do grafo local sem bloquear a ingestão de deltas P2P fora de ordem.
+
 ### 2.3 Tabelas Auxiliares Locais (Não-Replicáveis)
 
 Além das duas tabelas replicáveis, o SQLite local contém tabelas auxiliares (**Projeções Estruturais**) mantidas por **Triggers nativos do SQLite**. Estas **nunca saem do dispositivo**:
 
-- **entity_heads**: Ponteiro para a versão mais recente de cada `entity_id`.
+- **entity_heads**: Read-model O(1) que aponta para a versão mais recente (`head_id`) de cada `entity_id`. É a tabela de leitura canônica para saldo e estado corrente de qualquer entidade. Para nós do tipo `ASSET:BALANCE_STATE`, `entity_heads` aponta para a "cabeça" vigente da linhagem de saldo de cada titular, tornando a consulta de saldo atual uma operação de tempo constante — sem varredura de Linhagem de Versões em tempo de renderização. Triggers SQLite atualizam `entity_heads` automaticamente a cada novo nó inserido que supera a versão anterior (por `created_at`). O TinyBase e a UI lêem saldo **exclusivamente** desta tabela. A tabela física `asset_balances` foi eliminada: o saldo consolidado vive no payload decriptado do nó `ASSET:BALANCE_STATE` mais recente, acessível via `entity_heads` sem aggregadores adicionais.
 - **active_edges**: Relações vigentes (tombstones de `weight=0` removem entradas daqui).
-- **asset_balances**: Saldo achatado.
 - **local_capabilities**: Árvore achatada de delegações UCAN.
 - **geo_index**: R*Tree nativa para buscas por raio.
 - **search_index_fts**: Índices em texto plano para busca (FTS5).
-- **Estado de sync e Auditoria Colaborativa (MFA-S)**:
-  - **snapshots**: Armazena o estado binário consolidado (`Y.encodeStateAsUpdate`) e o último `State Vector`.
-  - **yjs_updates**: O "Rolling Window". Contém os últimos $X$ updates binários para permitir sincronização rápida e Undo nativo.
-  - **pending_staging**: Tabela temporária que armazena mudanças brutas capturadas pelo `observeDeep` antes da consolidação semântica.
-  - **audit_logs**: O histórico imutável semântico. Contém JSONs legíveis com `antes/depois` (before/after), `userId`, `path` e o `vector_clock` (para rastreio de causalidade).
+- **Estado de sync colaborativo**:
+  - **pending_changes**: Armazena as Changes brutas do Automerge acumuladas pré-commit. Colunas: `doc_entity_id TEXT`, `change_hash TEXT`, `change_blob BLOB`, `captured_at INTEGER`, `peer_id TEXT`. Serve para: (a) durabilidade local de edições não confirmadas em caso de crash pré-commit; (b) fonte para sync ephemeral em tempo real via Automerge Repo antes do commit. Limpa automaticamente após commit bem-sucedido do nó-versão correspondente. A tabela `snapshots` foi eliminada: o snapshot agora **é** o `payload` do nó `head` em `nodes`. As tabelas `yjs_updates` e `pending_staging` foram eliminadas.
 - **Preferências do usuário** específica do dispositivo.
 - **Cache de mídia** (thumbnails, blobs descriptografados temporários).
 - **Fila de intenções pendentes** (intenções aguardando validação online).
@@ -165,7 +158,7 @@ A escrita e leitura são divididas arquiteturalmente. O TinyBase foca em ser a *
 - **Expor reatividade granular**: componentes React subscrevem queries específicas e re-renderizam apenas quando afetados.
 
 Por sua vez, o **Sync Worker** assume o fardo pesado:
-- **Aplicar deltas P2P**: ouvir deltas do Y.js, decifrar, validar e persistir direto no SQLite (Opção B - via rápida de performance).
+- **Aplicar Changes P2P**: ouvir Changes do Automerge Repo, decifrar, validar e persistir direto no SQLite (Opção B - via rápida de performance).
 - **Construir Merge Commits**: em caso de merges de branches, o Sync Worker gera a `V_Merge` materializada com duas arestas `MUTATES` e assina, evitando dependência da UI para resolver conflitos.
 
 ### 3.2 Estrutura Lógica
@@ -180,7 +173,7 @@ Tables canônicas em uma store de rede:
 - `projections_*` — projeções específicas por módulo (ex: `projections_chat_messages_by_thread`).
 - `pending_intents` — intenções não validadas localmente.
 - `peer_directory` — peers conhecidos e seus estados (online, capabilities oferecidas, último contato).
-- `sync_state` — vetores de estado Y.js por documento/grupo.
+- `sync_state` — estado de sincronização do Automerge Repo por documento/grupo (fingerprints de ranges e cursores de Changes).
 
 ### 3.3 Política de Espelhamento
 
@@ -207,18 +200,50 @@ const messages = useTable('projections_chat_messages_by_thread', {
 
 O componente re-renderiza apenas quando dados que casam com essa query mudam. Mudanças em outras threads, em outros módulos ou em outros nós não disparam re-render desnecessário.
 
-### 3.5 Coordenação com Y.js (Sync Worker)
+### 3.5 Coordenação com Automerge Repo (Sync Worker)
 
-O Sync Worker opera como ponte exclusiva entre a rede P2P (Y.js) e o banco local:
+O Sync Worker opera como ponte exclusiva entre o Automerge Repo, a rede P2P e o banco local:
 
-- Quando a UI escreve algo, o TinyBase persiste localmente e notifica o Sync Worker para traduzir para uma operação Y.js (ex: criar nó vira `Y.Map.set`).
-- O provider WebRTC (gerido pelo Worker) envia o delta para peers.
-- Deltas remotos chegam no Y.js, que dispara o observer no próprio Worker.
-- O Sync Worker traduz o delta remoto de volta para escrita estruturada no SQLite.
-- O SQLite dispara seus Triggers, atualizando `entity_heads`.
-- O TinyBase é notificado do flush e recarrega os dados na UI (mantendo alta performance de 60fps sem congelar a Main Thread).
+- **Escrita local:** Quando a UI escreve algo num documento colaborativo, o Automerge Repo aplica a mudança ao documento em memória, gerando novas Changes. O Sync Worker captura essas Changes e as persiste em `pending_changes`.
+- **Sync em tempo real (pré-commit):** O Automerge Repo propaga as Changes como ephemeral messages via WebRTC para co-editores. Esses peers recebem e aplicam as Changes localmente em memória — feedback visual imediato sem nós no grafo.
+- **Gatilho de commit:** Ao atingir o limiar (inatividade ou volume), o Sync Worker elege ou confirma o Committer (conforme modo declarado na SPECIFICATION), consolida `Automerge.save(doc)` e insere o nó-versão em `nodes`.
+- **Commits remotos chegam via P2P:** Quando um peer remoto publica um nó-versão (novo commit), o Sync Worker recebe-o, valida a assinatura, aplica `Automerge.load(payload)` para reidratar o documento local, e insere o nó em `nodes`. O SQLite dispara Triggers, atualizando `entity_heads`. O TinyBase é notificado e re-renderiza a UI.
+- **Para dados estruturados do grafo** (nós/arestas que não são documentos colaborativos): o Sync Worker executa Range-Based Set Reconciliation com peers autorizados conforme Seção 8.
 
-Isso significa que **escritas locais e remotas seguem o mesmo caminho**, garantindo consistência.
+Escritas locais e remotas seguem o mesmo caminho de commit, garantindo consistência.
+
+### 3.6 Comunicação Interna do Sistema via Nós CONTENT:MESSAGE
+
+Toda a comunicação de infraestrutura entre componentes internos do sistema — filas de processamento, buscas de rede P2P, coordenação entre microsserviços, respostas de validadores e coordenação de onboarding — trafega pelo próprio grafo através de nós **`CONTENT:MESSAGE`**, em vez de canais de mensageria externos (queues, webhooks, REST interno).
+
+**Princípio:** o sistema opera offline-first também na comunicação interna. Agentes (`PROFILE:SYSTEM`) escrevem mensagens no grafo local; a entrega é garantida pela replicação P2P, sem canal paralelo fora do grafo.
+
+**Subtipos técnicos canônicos** (definidos por SPECIFICATIONs canônicas):
+
+| Subtipo | Uso |
+|---------|-----|
+| `SYSTEM_QUERY` | Solicitação de dado ou operação de um agente para outro (ex: busca federada, solicitação de reidratação) |
+| `SYSTEM_RESPONSE` | Resposta a uma `SYSTEM_QUERY`, conectada por aresta `REPLIES_TO` |
+| `ONBOARDING_REQUEST` | Requisição de acolhimento enviada pelo dispositivo novo ao Agente de Acolhimento do Super Peer |
+| `ONBOARDING_ACCEPTED` | Confirmação de onboarding pelo Agente, transportando `auth_entity_id` e hints de chave |
+| `ONBOARDING_REJECTED` | Rejeição de onboarding com motivo estruturado |
+| `RECOVERY_REQUEST` | Requisição de recuperação de acesso (mesma mecânica do onboarding) |
+| `REPLICATION_INSTRUCTION` | Instrução do Super Peer corporativo para redistribuir responsabilidade de retenção entre peers |
+
+**Roteamento entre agentes:**
+
+```
+[Agente A cria CONTENT:MESSAGE]
+  Aresta DIRECTED_TO → [entity_id do Agente B destinatário]
+  
+[Agente B responde]
+  Novo CONTENT:MESSAGE
+  Aresta REPLIES_TO → [id específico da mensagem original de A]
+```
+
+O TinyBase observa arestas `DIRECTED_TO` apontando para o `entity_id` do agente local e popula a fila de processamento em memória. Workers processam as mensagens de entrada como eventos e escrevem respostas de volta ao SQLite, que replica via Automerge Repo.
+
+Esta arquitetura garante que a comunicação entre agentes seja: auditável (cada mensagem é um nó no grafo imutável), offline-first (mensagens persistem mesmo se o destinatário estiver temporariamente offline), e sem necessidade de infraestrutura de mensageria externa ao grafo.
 
 ---
 
@@ -364,7 +389,28 @@ A transição Integral → Podado → Expurgado é governada por **G4 (híbrido 
 - Em redes com "dono", regras dinâmicas podem distribuir responsabilidade de retenção entre peers (poda coordenada — seção 8).
 - **Retenção legal forçada** para domínios regulados (fiscal, financeiro, eSocial): nunca expurgar, ignorar pressão de storage (notificar usuário se necessário expandir).
 
-### 5.6 Cuidado com Expurgo Prematuro
+### 5.6 Estado Especial: Órfão (Orphan)
+
+O estado `'orphan'` ocorre exclusivamente durante a ingestão de deltas P2P recebidos fora de ordem causal: um nó ou aresta chega via replicação antes de seu `source_id` ou `target_id` estar disponível no banco local.
+
+**Comportamento:**
+
+- O registro é inserido normalmente com `retention_state = 'orphan'`.
+- O Sync Worker registra o ID do pai ausente em uma fila de reidratação prioritária.
+- Usando o **11º caractere do ULID** do ID ausente, o Worker sabe imediatamente qual tabela consultar (`'N'` → `nodes`, `'E'` → `edges`) e aciona o Graph-Based Routing direcionado.
+- Quando o pai chega e é inserido, um Trigger SQLite percorre os órfãos aguardando aquele ID e atualiza seus `retention_state` para `'integral'`.
+
+**Garantias:**
+
+- Órfãos são visíveis apenas para o Sync Worker; a UI **nunca** os exibe (queries da UI filtram implicitamente por `retention_state != 'orphan'`).
+- Um órfão nunca impede a ingestão de outros deltas.
+- Se o pai nunca chega (ex: nó expurgado globalmente), o órfão permanece em estado `'orphan'` e pode ser limpo pelo GC após timeout configurável por SPECIFICATION.
+
+**Distinção de Pruned:**
+
+`'orphan'` ≠ `'pruned'`. Um nó podado (`pruned`) tem seu `payload` zerado deliberadamente após consolidação completa — sua topologia no grafo local é conhecida. Um nó órfão chegou antes de seu contexto; sua posição no grafo local ainda é desconhecida ou incompleta. São mecanismos complementares com origens e tratamentos distintos.
+
+### 5.7 Cuidado com Expurgo Prematuro
 
 A transição para Expurgado é **destrutiva localmente** — recuperação requer rede. Em modalidades onde rede pode ser indisponível (P2P puro com peers offline), o sistema é conservador:
 
@@ -393,20 +439,20 @@ Quando o peer precisa de um nó em estado Podado ou Expurgado:
 
 **Etapa 1: Identificação Topológica (Local)**
 
-- Para nó Podado: consulta `edges` local. Arestas como `MEMBER_OF`, `AUTHORED`, `BELONGS_TO` revelam outros peers no mesmo contexto.
+- Para nó Podado: consulta `edges` local. Arestas como `PARTICIPATES_IN`, `AUTHORED`, `BELONGS_TO` revelam outros peers no mesmo contexto.
 - Para nó Expurgado: usa metadados do snapshot para identificar o `context_id` (grupo, tópico, conversa, projeto).
 
 **Etapa 2: Descoberta Direcionada**
 
 Com IDs dos peers candidatos identificados, o peer aciona a camada de signaling (Cloud da rede ou trackers federados) solicitando abertura de túneis WebRTC com esses peers específicos.
 
-**Etapa 3: Reidratação via Y.js**
+**Etapa 3: Reidratação via REQUEST_NODES**
 
-Conexão WebRTC estabelecida, os documentos Y.js trocam **State Vectors**. O peer remoto calcula exatamente quais deltas o peer local não possui e envia apenas o necessário.
+Conexão WebRTC estabelecida, o peer local emite uma requisição `REQUEST_NODES` (canal RPC ponto-a-ponto separado) com os IDs dos nós e arestas que necessita. O peer remoto responde com cada nó solicitado e suas arestas diretas como pacote atômico. Este canal é cirúrgico e direcionado — não usa Range-Based Set Reconciliation.
 
 **Etapa 4: Reconstrução de Estado**
 
-Deltas chegam, passam por Validador de Domínio (verifica assinatura, hash MFA-S, capability), e via TinyBase são aplicados ao SQLite. O nó retorna ao estado Integral.
+Os pacotes chegam, passam pelo Validador de Domínio (verifica assinatura, capability), e via TinyBase são aplicados ao SQLite. O payload do nó (snapshot Automerge) é carregado via `Automerge.load(payload)` quando necessário. O nó retorna ao estado Integral.
 
 ### 6.3 Garantias
 
@@ -446,7 +492,7 @@ Não-negociável: o app deve ficar operacional em poucos segundos após autentic
 
 - Identidade do usuário: `PROFILE:AUTHENTICATION`, `CONTENT:PERSONAL_DATA`, personas associadas.
 - Capabilities ativas: ASSETs `CAPABILITY` e `ROLE` que o usuário possui.
-- Lista de grupos/canais/contextos de acesso: arestas `MEMBER_OF` ativas.
+- Lista de grupos/canais/contextos de acesso: arestas `PARTICIPATES_IN` ativas.
 - Specifications canônicas + specifications de rede relevantes.
 - Estado mínimo de UI (tema selecionado, idioma, preferências).
 
@@ -506,7 +552,7 @@ Otimização: dispositivo existente do usuário (em outra rede ou outra instânc
 
 **Retorno após longa ausência:**
 
-Tratado como sync incremental. Vetores de estado Y.js indicam o que mudou desde o último sync; apenas deltas novos chegam. Onda 0 reduzida (apenas refresh de capabilities e specifications).
+Tratado como sync incremental. O protocolo de Range-Based Set Reconciliation identifica o que mudou desde o último sync e apenas os nós/arestas divergentes são transferidos. Para documentos colaborativos, o Automerge Repo sincroniza as Changes ausentes. Onda 0 reduzida (apenas refresh de capabilities e specifications).
 
 ### 7.6 Indicador de Sync na UI
 
@@ -519,7 +565,48 @@ Princípio: **transparente sem intrusivo**.
 
 ---
 
-## 8. Replicação Coordenada e Replication Factor
+## 8. Protocolo de Sincronização de Dados Estruturados
+
+Esta seção descreve os protocolos de sincronização para **dados estruturados do grafo** (nós e arestas nas tabelas `nodes`/`edges`), que operam de forma independente do Automerge Repo — este gerencia somente documentos colaborativos.
+
+### 8.1 Range-Based Set Reconciliation
+
+Para sincronizar eficientemente o conjunto de nós/arestas entre dois peers, a plataforma adota **Range-Based Set Reconciliation** sobre uma B-tree de fingerprints mantida em memória pelo Sync Worker.
+
+**Princípio:**
+- Cada nó ou aresta do peer é representado por um fingerprint: `H(id || signature)` (XOR de hashes SHA-256 truncados).
+- Os fingerprints são organizados em B-tree indexada lexicograficamente por `id`.
+- O Sync Worker divide o conjunto em ranges e troca com o peer remoto o **XOR dos fingerprints de cada range** (não os IDs individuais).
+- Ranges com XOR divergente indicam diferença; eles são subdivididos recursivamente até os IDs exatos que diferem serem identificados.
+- Apenas os nós/arestas faltantes ou divergentes são solicitados e transferidos.
+
+**Vantagens sobre Vector Clocks:**
+- Sincronização sub-linear: identifica divergências sem transmitir o conjunto completo de IDs.
+- Agnóstico a ordem de eventos: baseia-se em presença/ausência no conjunto, não em causalidade.
+- Eficiente para subconjuntos grandes com poucas divergências (caso típico de peers com contato recente).
+
+**Exemplo conceitual:**
+
+```
+Peer A tem: {n1, n2, n3, n4, n5}  → range fingerprint: XOR(H(n1)...H(n5))
+Peer B tem: {n1, n2, n3, n5}      → range fingerprint: XOR(H(n1)...H(n5) sem n4)
+
+Fingerprints diferem → Peer B solicita n4 via REQUEST_NODES
+```
+
+### 8.2 Sync Dirigido por Capabilities
+
+O Sync Worker **não usa arquiteturas tradicionais de Pub/Sub** (tópicos fixos, canais de broadcast por grupo). Em vez disso, o sync é inteiramente dirigido pelas capabilities ativas do peer:
+
+1. **Varredura de escopo autorizado:** Ao iniciar uma sessão de sync com um peer remoto, o Worker lê a tabela local `local_capabilities` e determina os escopos de autorização — os conjuntos de `entity_id`s e tipos de nós que o peer local tem direito de acessar.
+
+2. **Reconciliação restrita ao escopo:** A troca de fingerprints de ranges ocorre **apenas nos escopos autorizados**. Um peer sem capability sobre um contexto nunca recebe nem transmite fingerprints relacionados a esse contexto — a filtragem é matemática, não por confiança no peer remoto.
+
+3. **Reidratação histórica via REQUEST_NODES:** A reconciliação de ranges detecta o que falta, mas não recupera nós em estado `pruned` ou `expunged`. Para reidratação histórica, o Worker usa o canal RPC ponto-a-ponto `REQUEST_NODES`: envia os IDs dos nós que precisa ao peer remoto; este responde com o nó completo (incluindo `payload`) e suas arestas diretas como pacote atômico. Este canal também é filtrado por capabilities do solicitante.
+
+4. **Sem tópico global:** Não existe "canal do grupo X" ou "fila de updates". O grafo de capabilities **é** o roteamento — peers se sincronizam sobre o que têm em comum por construção, sem registro central de assinaturas.
+
+## 9. Replicação Coordenada e Replication Factor
 
 Para garantir disponibilidade de dados sem replicar tudo em todos os peers, o sistema coordena replicação entre peers de um mesmo grupo. A coordenação varia por modalidade (H4: híbrido por tipo de rede).
 
@@ -599,19 +686,20 @@ Pesos podem mudar ao longo do tempo conforme padrões de acesso. Isso é gerido 
 
 ---
 
-## 9. Snapshots e Bootstrap Acelerado
+## 10. Snapshots de Bootstrap e Reidratação
 
-Sincronização inicial reconstruindo deltas individuais é viável mas pode ser lenta para volumes grandes. Snapshots oferecem fast-path.
+Sincronização inicial reconstruindo nós individuais é viável mas pode ser lenta para volumes grandes. Snapshots de bootstrap oferecem fast-path.
 
-### 9.1 O Que é um Snapshot
+### 9.1 O Que é um Snapshot de Bootstrap
 
-Snapshot é um **estado consolidado** de um grupo/contexto em determinado momento, em formato compacto, assinado pelo peer que o gerou.
+Snapshot de bootstrap é um **pacote compacto de estado consolidado** de um grupo/contexto em determinado momento, gerado e assinado pelo super peer ou peer do sistema.
 
-Conteúdo típico:
+**Distinção importante:** o conceito de "snapshot" como tabela física auxiliar local foi eliminado. O snapshot de um documento colaborativo **é o `payload` do nó-versão head na tabela `nodes`** — produzido via `Automerge.save(doc)` no momento do commit. O snapshot de bootstrap descrito nesta seção é um pacote de transporte para acelerar o onboarding de novos peers.
 
-- Conjunto de nós e arestas do contexto, em estado Podado (sem payloads).
+Conteúdo típico do pacote de bootstrap:
+
+- Conjunto de nós e arestas do contexto, em estado Podado (sem payloads de conteúdo sensível).
 - Manifest de IDs e hashes para verificação de integridade.
-- Vetor de estado Y.js correspondente.
 - Assinatura do gerador.
 - Timestamp de geração.
 
@@ -623,7 +711,7 @@ Conteúdo típico:
 
 ### 9.3 Quando São Usados
 
-- **Primeiro login em rede corporativa**: peer recebe snapshot do super peer como Onda 1, depois sincroniza apenas o delta desde o snapshot via Y.js. Drasticamente mais rápido que reconstruir via deltas individuais.
+- **Primeiro login em rede corporativa**: peer recebe o pacote de bootstrap do super peer como Onda 1, depois sincroniza apenas os nós/arestas ausentes via Range-Based Set Reconciliation e `REQUEST_NODES`. Drasticamente mais rápido que reconstruir via protocolo de reconciliação completo.
 - **Recuperação após longa ausência**: idem.
 - **Reidratação de Estado Expurgado**: snapshot indica quais IDs foram expurgados; peer pode requisitar reidratação seletiva.
 
@@ -641,7 +729,7 @@ Mesmo assim, em estado Podado, snapshot revela metadados (existência de IDs, da
 
 ---
 
-## 10. Hierarquia Criptográfica e Forward Secrecy
+## 11. Hierarquia Criptográfica e Forward Secrecy
 
 ### 10.1 As Quatro Camadas de Chaves
 
@@ -697,7 +785,7 @@ Está fora do escopo deste documento e será detalhada em especificação técni
 
 ---
 
-## 11. Cache Volátil e Modos de Acesso
+## 12. Cache Volátil e Modos de Acesso
 
 ### 11.1 Princípio
 
@@ -726,17 +814,17 @@ SPECIFICATION da rede pode ajustar:
 
 ---
 
-## 12. Web Workers e Processamento em Background
+## 13. Web Workers e Processamento em Background
 
 ### 12.1 Por Que Workers
 
 Vários trabalhos da camada de dados são pesados e não devem bloquear o thread principal da UI:
 
 - **Decryption AES-GCM em volume** (sync inicial pode ter dezenas de milhares de payloads).
-- **Cálculo de hash MFA-S** (cadeia de verificação ao receber deltas em massa).
-- **Aplicação de deltas Y.js em batch**.
+- **Aplicação de Changes Automerge em batch** (carregar `Automerge.load(payload)` de nós-versão recebidos via P2P).
+- **Range-Based Set Reconciliation** (cálculo de fingerprints XOR sobre B-tree para identificação de divergências).
 - **Indexação de novos conteúdos** (geração de entradas em índices em texto plano).
-- **Compressão e descompressão de snapshots**.
+- **Compressão e descompressão de pacotes de bootstrap**.
 
 Sem workers, mobile médio enfrenta lag perceptível durante sync, indexação inicial e operações em massa.
 
@@ -744,7 +832,7 @@ Sem workers, mobile médio enfrenta lag perceptível durante sync, indexação i
 
 A V3 inclui obrigatoriamente:
 
-- **Sync Worker**: aplica deltas Y.js, decryption, validação MFA-S, escrita em SQLite via TinyBase.
+- **Sync Worker**: gerencia Automerge Repo, aplica Changes e commits, executa Range-Based Set Reconciliation, decryption, validação de assinaturas, escrita em SQLite.
 - **Index Worker**: gera/atualiza índices em texto plano e estruturas FTS5 quando conteúdo novo chega.
 - **Crypto Worker**: operações criptográficas pesadas em batch (rotação de época, geração de assinatura em massa).
 
@@ -773,7 +861,7 @@ type WorkerResult =
 
 ---
 
-## 13. Performance e Tier-Aware Degradation
+## 14. Performance e Tier-Aware Degradation
 
 ### 13.1 Detecção de Tier
 
@@ -822,7 +910,7 @@ Configurações expostas:
 
 ---
 
-## 14. Quotas de Storage e Garbage Collection
+## 15. Quotas de Storage e Garbage Collection
 
 ### 14.1 Quota Explícita
 
@@ -845,7 +933,7 @@ Ao se aproximar do limite de quota:
 1. Sistema notifica usuário com proposta proativa (princípio 2.2).
 2. Usuário pode: aumentar quota, desfazer pins seletivos, autorizar poda agressiva, fazer backup externo.
 3. Se nenhuma ação e quota estoura, sistema executa poda automática respeitando:
-   - **Co-Compactação**: O Garbage Collector atua apagando o payload no SQLite e simultaneamente instrui o Y.js a compactar as operações do seu State Vector referentes àquela época.
+   - **Co-Compactação**: O Garbage Collector atua apagando o payload no SQLite e simultaneamente instrui o Automerge Repo a liberar os Changes correspondentes da memória e do armazenamento OPFS referentes àquela época.
    - **Pins do usuário** são intocáveis.
    - **Retenção legal forçada** é intocável (notifica que precisa expandir).
    - **Defaults por subtipo** (tabela 5.5) são respeitados.
