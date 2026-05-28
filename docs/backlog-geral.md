@@ -19,19 +19,20 @@ Este documento centraliza e descreve todas as funcionalidades pendentes, lacunas
 ## Detalhamento Técnico das Lacunas e Tarefas Pendentes
 
 ### Fase 1: Infraestrutura Criptográfica & Identidade
-*Foco: Garantir que a identidade do usuário, chaves e capacidades de acesso existam de forma matematicamente segura antes de sincronizar ou exibir dados.*
+*Foco: Garantir que a identidade do usuário, chaves e permissões de acesso existam de forma matematicamente segura antes de sincronizar ou exibir dados.*
 
 * **Status:** 🔴 **Não Iniciado**
 * **Arquivos Chave:**
   * [NEW] `packages/core/src/security/identity.ts` (ou similar) — Para gerenciar geração de chaves Ed25519 e PBKDF2 local.
-  * [NEW] `apps/web/src/worker/crypto-worker.ts` — Web worker para chaves temporárias em memória (TTL de 4h) e criptografia AES-GCM em segundo plano.
+  * [NEW] `apps/web/src/worker/crypto-worker.ts` — Web worker para chaves temporárias em memória (TTL de 4h) e criptografia AES-GCM em segundo plano, contendo o Key Vault.
   * [NEW] `packages/core/src/security/ucan.ts` — Modelagem e validação dos tokens UCAN.
   * [NEW] `packages/core/src/security/sss.ts` — Implementação da divisão de segredo Shamir 2-de-3.
 
 #### Checklist de Tarefas:
 - [ ] **Identidade Local & BIP39**: Implementar derivação de chaves Ed25519 a partir de sementes BIP39 de 12/24 palavras. Cifrar localmente usando PBKDF2 com a senha do usuário.
 - [ ] **Cifragem AES-256-GCM por Épocas**: Armazenar payloads de nós e arestas como BLOBs criptografados com IVs. Indexar coluna `epoch` nas tabelas do SQLite.
-- [ ] **Tokens UCAN (Capabilities)**: Representar tokens UCAN como nós `ASSET:CAPABILITY` e arestas `DELEGATED_TO` apontando para a persona detentora. Validar expiração e cadeia recursiva.
+- [ ] **Separação UCAN / Key Vault**: Implementar o fluxo de tokens UCAN estritamente como provas de autorização (sem material de chaves no payload) e o subsistema Key Vault no Crypto Worker para entrega de chaves de época baseada no TTL do papel ativo.
+- [ ] **Ontologia de Permissões V3.1**: Modelar `ASSET:PERMISSION` (com queries de traversal com profundidade limite $\le$ 6 e restrições de mutação) e `ASSET:ROLE` com as arestas estruturais `AGGREGATES` e `REQUIRES` conectadas ao `entity_id` estável.
 - [ ] **Recuperação de Chave Mestra**: Fluxo Shamir's Secret Sharing (SSS) com 3 partes (dispositivo, provedor/fundador, canal externo).
 
 ---
