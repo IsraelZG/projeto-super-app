@@ -1,14 +1,6 @@
-*.txt
-*.md
-.env
-node_modules
-dist
-build
-*.sqlite
-*.sqlite-journal
-*.sqlite-shm
-*.sqlite-wal
-.vscode/
-c:\Dev2026\Design System\generate_project_summary.js
-!docs/**/*.md
-!.specify/**/*.md
+# Ignore everything
+*
+
+# Allow the docs directory and all its contents
+!docs/
+!docs/**
