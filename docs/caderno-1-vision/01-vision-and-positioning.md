@@ -2,7 +2,7 @@
 
 ## 1. Visão e Posicionamento
 
-A **Plataforma V3.0** é um sistema operacional de dados distribuído, projetado para construir aplicações local-first, offline-first e P2P-oportunístico. Sua ambição é unificar, sob uma mesma fundação técnica, três modalidades de uso historicamente atendidas por sistemas separados:
+A **Plataforma V3.1** é um sistema operacional de dados distribuído, projetado para construir aplicações local-first, offline-first e P2P-oportunístico. Sua ambição é unificar, sob uma mesma fundação técnica, três modalidades de uso historicamente atendidas por sistemas separados:
 
 - **Redes públicas de larga escala**, equivalentes funcionais a combinações de Google Workspace, Mercado Livre e Instagram, com livre adesão de usuários e foco em descoberta, transação e interação social.
 - **Redes corporativas whitelabel**, substituindo intranets, ERPs, CRMs e sistemas de produtividade interna de empresas, com identidade gerenciada centralmente e dados isolados.

@@ -1,6 +1,6 @@
-# Backlog Geral de Implementação — Plataforma V3.0 (Local-First & P2P)
+# Backlog Geral de Implementação — Plataforma V3.1 (Local-First & P2P)
 
-Este documento centraliza e descreve todas as funcionalidades pendentes, lacunas e status de implementação da Plataforma V3.0 do Superapp. Ele serve como o ponto de verdade para desenvolvedores e agentes de IA sobre o que falta ser codificado no projeto.
+Este documento centraliza e descreve todas as funcionalidades pendentes, lacunas e status de implementação da Plataforma V3.1 do Superapp. Ele serve como o ponto de verdade para desenvolvedores e agentes de IA sobre o que falta ser codificado no projeto.
 
 ---
 

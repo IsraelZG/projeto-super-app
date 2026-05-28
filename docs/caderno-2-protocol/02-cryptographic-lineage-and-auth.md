@@ -1,12 +1,12 @@
 # 02-cryptographic-lineage-and-auth.md — Cryptographic Lineage & Auth Specification
 
-Este documento define os modelos de identidade criptográfica, atribuição causal, controle de acesso e recuperação de chaves na Plataforma V3.0.
+Este documento define os modelos de identidade criptográfica, atribuição causal, controle de acesso e recuperação de chaves na Plataforma V3.1.
 
 ---
 
 ## 1. Identidade e Modelo Multi-Persona
 
-A identidade de um usuário humano na Plataforma V3.0 é estruturada em camadas independentes para assegurar a separação rigorosa de contextos e a privacidade de interações.
+A identidade de um usuário humano na Plataforma V3.1 é estruturada em camadas independentes para assegurar a separação rigorosa de contextos e a privacidade de interações.
 
 ### 1.1 A Identidade-Âncora (`PROFILE:AUTHENTICATION`)
 * **Definição**: É a raiz criptográfica do usuário humano dentro de uma rede específica. Carrega a chave privada mestra Ed25519 e os metadados de credencial.
@@ -36,20 +36,25 @@ A Plataforma V3.1 adota uma separação rigorosa entre **Fatos Sociais/Estrutura
 ### 2.1 ASSET:PERMISSION e ASSET:ROLE
 * **`ASSET:PERMISSION`**: Representa um direito atômico e granular de acesso. É definido por:
   * **Query de Traversal (Leitura)**: Especifica o subgrafo acessível. Contém `root` (nó raiz), `depth` (profundidade limite $\le$ 6), `direction` (outbound, inbound ou bi-directional), além de filtros opcionais para tipos de `edges` (arestas) e `nodes` (nós).
+    * **Invariante de Validação de Traversal Profundo**: Para profundidades maiores que 1 (`depth > 1`), o UCAN **deve obrigatoriamente** incluir um filtro de arestas (`edge_filter`). Esta whitelist de filtros é validada no formato de pares **`(tipo_aresta -> tipo_no_alvo_permitido)`** (ex: `AGGREGATES -> ASSET:PERMISSION` ou `CONTAINS -> CONTENT:DOCUMENT`), impedindo que o traversal de múltiplos hops se desvie do caminho estrutural inócuo e termine alcançando nós que contenham dados pessoais ou sensíveis.
   * **Restrições de Mutação (Escrita)**: Delimita as arestas e nós que o titular pode criar ou modificar no subgrafo autorizado (profundidade limite $\le$ 6).
 * **`ASSET:ROLE`**: Representa um papel ou função de negócio. É um agrupamento lógico que conecta múltiplos nós `ASSET:PERMISSION` através de arestas estruturais do tipo `AGGREGATES` (indicando composição).
 * **Relacionamento `REQUIRES`**: Nós `ASSET:PERMISSION` podem se relacionar com outras permissões via arestas `REQUIRES`, modelando pré-requisitos lógicos de acesso. Ambas as arestas (`AGGREGATES` e `REQUIRES`) apontam para o `entity_id` estável das entidades.
-* **Inline Templates nas Especificações**: Para simplificar o grafo e manter o ciclo de vida unificado, os moldes/templates de papéis e permissões não flutuam como nós isolados no grafo; eles residem no payload das especificações (`SPECIFICATION`) sob as propriedades `permission_templates` e `role_templates`, compartilhando a mesma versão e SemVer da especificação que as rege.
+* **Templates vs. Instanciação Física**: Os moldes/templates de papéis e permissões residem no payload das especificações (`SPECIFICATION`) sob as propriedades `permission_templates` e `role_templates`. Eles funcionam estritamente como um **blueprint (molde)** conceitual de suporte ao código de bootstrap.
+  > [!IMPORTANT]
+  > Para fins de validação de acesso e controle de segurança, o sistema **nunca consulta o payload de SPECIFICATIONs**. A validação de direitos é feita consultando unicamente os ativos físicos do usuário (`ASSET:ROLE` / `ASSET:PERMISSION`) instanciados como nós no banco de dados, e o DAG físico resultante de pré-requisitos conectados pelas arestas `AGGREGATES` e `REQUIRES` no banco.
 
 ### 2.2 UCAN e Separação do Cofre de Chaves (Key Vault)
 * A autenticação e a cadeia de delegação de acesso baseiam-se em tokens **UCAN (User Controlled Authorization Networks)**.
 * **Separação Criptográfica**: Ao contrário de modelos em que tokens carregam chaves de conteúdo diretamente, os UCANs na Plataforma V3.1 funcionam estritamente como **provas de autorização de tráfego**. O payload de um UCAN *nunca* contém material de chaves criptográficas (como chaves AES ou privadas).
-* **Fluxo de Acesso**:
-  1. O peer apresenta o UCAN para provar que possui um direito (`ASSET:PERMISSION` ou `ASSET:ROLE`) ativo e válido.
-  2. O **Cofre de Chaves (Key Vault)** — um subsistema isolado acoplado ao Crypto Worker — valida o UCAN e as restrições associadas.
-  3. Caso o UCAN seja válido, o Key Vault entrega a **Chave de Época** (AES-256) correspondente, cujo ciclo de vida e expiração (TTL) são governados pelo tempo de vida do papel ou consentimento associado.
+* **Fluxo de Acesso Inverso (Capabilities-Based)**: O fluxo de solicitação e validação de dados opera de forma inversa:
+  1. O peer que solicita o dado **deve exibir suas credenciais (o token UCAN correspondente) diretamente anexadas à requisição**.
+  2. Esse token UCAN contém e descreve a **Query de Traversal** que será executada localmente para retornar os dados.
+  3. O peer que fornece o dado (ou o Key Vault local) valida criptograficamente as assinaturas e cadeias de delegação do UCAN. Caso seja válido, o Key Vault entrega as **Chaves de Época** (AES-256) correspondentes apenas aos payloads solicitados pela query, garantindo que quem fornece o dado esteja plenamente amparado pelas credenciais anexadas.
+* **Invariante de Validação de Consentimento**: A presença de qualquer aresta que aponte para um nó do tipo `ASSET:CONSENT`, ou que cubra um nó do tipo `CONTENT:PERSONAL_DATA` dentro do subgrafo de traversal solicitado, **rebaixa automaticamente o tier mínimo de TTL** permitido na emissão do UCAN correspondente. Qualquer solicitação de emissão de um UCAN com TTL de criticidade 'Baixa' (infinito/longo) que cubra escopos relacionados a consentimento ou dados pessoais é **expressamente rejeitada e barrada pelo Zen Engine**.
+  * **Otimização de Processamento (Single-Pass Validation)**: Para evitar custos computacionais duplicados, a checagem de consentimento (verificando os tipos de nós alcançados) e a validação do `edge_filter` (whitelist do T3) ocorrem em um **único passo unificado** no momento da emissão do UCAN, resolvendo a query de traversal correspondente uma única vez.
 * **Delegação Recursiva**: UCANs permitem delegação em cascata (A delega para B, que delega para C, dentro dos mesmos limites de traversal). O criador do recurso ou a especificação governante pode desativar a delegação recursiva via atributo `delegatable: false`.
-* **Revogação**: Realizada gravando-se uma lápide (aresta de revogação com `weight = 0` ou aresta de expiração) no grafo.
+* **Revogação**: Realizada gravando-se uma lápide (aresta de revogação com `active = 0` ou aresta de expiração) no grafo.
 
 ---
 
@@ -77,6 +82,7 @@ Quando um membro ou papel é revogado de um grupo/documento:
 2. A nova chave é encapsulada em envelopes criptográficos distribuídos exclusivamente aos participantes cujos UCANs correspondentes à `ASSET:PERMISSION` ou `ASSET:ROLE` continuam ativos.
 3. Quaisquer novos nós ou arestas gravados a partir desse instante usam a chave da nova época.
 4. O membro excluído perde o acesso às chaves das novas épocas. Contudo, mantém acesso aos dados históricos cifrados com chaves das épocas em que era participante (preservando o forward secrecy pragmático).
+*   **Acesso pós-rotação offline**: Há uma distinção importante: **`UCAN válido offline` $\neq$ `acesso ao conteúdo pós-rotação`**. Se a chave de época rotacionar enquanto um dispositivo com UCAN válido está offline, o dispositivo conseguirá ler todo o histórico anterior criptografado com as chaves de época antigas que ele possui localmente. No entanto, ele **não conseguirá descriptografar os novos nós** gravados na época recente até que restabeleça a conexão de rede para obter e reidratar a nova chave criptografada correspondente.
 
 ### 3.4 KMS Online-Optional e Conectividade
 * **Modo Online**: Com conectividade ativa, a rotação de chaves e revogação de UCANs se propagam instantaneamente na rede.

@@ -1,12 +1,12 @@
 # 03-legal-and-compliance-framework.md — Legal & Compliance Framework
 
-Este documento estabelece o posicionamento jurídico e regulatório da Plataforma V3.0 frente a legislações globais de privacidade de dados, em particular a **LGPD** (Lei Geral de Proteção de Dados - Brasil) e o **GDPR** (General Data Protection Regulation - Europa).
+Este documento estabelece o posicionamento jurídico e regulatório da Plataforma V3.1 frente a legislações globais de privacidade de dados, em particular a **LGPD** (Lei Geral de Proteção de Dados - Brasil) e o **GDPR** (General Data Protection Regulation - Europa).
 
 ---
 
 ## 1. Delimitação de Papéis: Quem é o Controlador de Dados?
 
-A legislação de proteção de dados distingue a figura do **controlador** (quem define a finalidade e os meios de tratamento) da figura do **operador** (quem realiza o tratamento em nome do controlador). Na topologia distribuída da Plataforma V3.0, esses papéis variam conforme a modalidade de rede:
+A legislação de proteção de dados distingue a figura do **controlador** (quem define a finalidade e os meios de tratamento) da figura do **operador** (quem realiza o tratamento em nome do controlador). Na topologia distribuída da Plataforma V3.1, esses papéis variam conforme a modalidade de rede:
 
 ### 1.1 Redes Corporativas Whitelabel
 * **Controlador**: A empresa licenciante que opera e governa a rede é a controladora exclusiva de todos os dados de seus funcionários, clientes, parceiros e fornecedores.
@@ -23,7 +23,7 @@ A legislação de proteção de dados distingue a figura do **controlador** (que
 
 ## 2. Direitos do Titular de Dados e Primitivas Nativas
 
-A Plataforma V3.0 possui primitivas no seu grafo de dados estruturados para garantir que o controlador atenda aos direitos previstos no artigo 18 da LGPD (e equivalentes do GDPR):
+A Plataforma V3.1 possui primitivas no seu grafo de dados estruturados para garantir que o controlador atenda aos direitos previstos no artigo 18 da LGPD (e equivalentes do GDPR):
 
 ### 2.1 Consentimento de Primeira Classe (`ASSET:CONSENT`)
 * O consentimento não é uma configuração implícita em código: é um nó `ASSET:CONSENT` auditável.
@@ -44,7 +44,7 @@ A Plataforma V3.0 possui primitivas no seu grafo de dados estruturados para gara
 O paradigma local-first opera sob uma limitação técnica inerente à distribuição de dados: **dados legitimamente baixados por peers autorizados em seus próprios dispositivos locais não podem ser garantidamente apagados pelo operador central**.
 
 ### 3.1 Procedimento de Mitigação no Expurgo
-Quando um titular solicita a exclusão de dados não protegidos por retenção regulatória, a Plataforma V3.0 executa as seguintes etapas:
+Quando um titular solicita a exclusão de dados não protegidos por retenção regulatória, a Plataforma V3.1 executa as seguintes etapas:
 1. **Exclusão no Núcleo**: Apaga os payloads e registros das bases de dados centrais do controlador (Cloud Peers, snapshots e buffers públicos).
 2. **Rotação de Época (Forward Secrecy)**: Revoga as permissões de acesso (`ASSET:PERMISSION` / `ASSET:ROLE`), disparando a rotação de chaves de época no cofre de chaves. Sem permissão ativa, o titular excluído é impedido de obter as chaves das novas épocas do cofre, tornando os novos dados do grupo matematicamente inacessíveis.
 3. **Poda e Expurgo em Peers Ativos**: Propaga a instrução de expurgo (`retention_state = 'expunged'`) para os peers online. Dispositivos de usuários honestos limpam o payload e referências locais de forma automatizada via Sync Worker.

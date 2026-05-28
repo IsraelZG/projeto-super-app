@@ -2,7 +2,7 @@
 
 ## 1. Monetização da Rede Pública
 
-A rede pública oficial da **Plataforma V3.0** monetiza-se de forma sustentável e descentralizada, sem recorrer a anúncios invasivos ou à exploração/venda de dados pessoais. O modelo de negócios apoia-se em três pilares:
+A rede pública oficial da **Plataforma V3.1** monetiza-se de forma sustentável e descentralizada, sem recorrer a anúncios invasivos ou à exploração/venda de dados pessoais. O modelo de negócios apoia-se em três pilares:
 
 ### 1.1 Taxas de Serviço em Transações (Fintech/Marketplace)
 * **Cobrança**: Micro-taxas cobradas em transações financeiras reguladas (via Banking-as-a-Service integrado) ou vendas concluídas no Marketplace primário de bens/serviços.
@@ -19,7 +19,7 @@ A rede pública oficial da **Plataforma V3.0** monetiza-se de forma sustentável
 
 ## 2. Regras de Whitelabel Corporativo
 
-As redes corporativas operam sob um modelo comercial e técnico próprio, permitindo que empresas licenciem a tecnologia da Plataforma V3.0 para criar seus ecossistemas de colaboração privada.
+As redes corporativas operam sob um modelo comercial e técnico próprio, permitindo que empresas licenciem a tecnologia da Plataforma V3.1 para criar seus ecossistemas de colaboração privada.
 
 ### 2.1 Licenciamento Whitelabel
 * **Marca Própria**: A empresa pode alterar inteiramente a identidade visual (nome, logo, paleta de cores padrão) do aplicativo nos formatos Web, Desktop e Mobile.
@@ -34,7 +34,7 @@ As redes corporativas operam sob um modelo comercial e técnico próprio, permit
 
 ## 3. Governança Open Source
 
-A Plataforma V3.0 é orientada por uma governança que equilibra o dinamismo comercial e a soberania tecnológica da comunidade.
+A Plataforma V3.1 é orientada por uma governança que equilibra o dinamismo comercial e a soberania tecnológica da comunidade.
 
 ### 3.1 Licenciamento de Software
 * **Core da Plataforma**: O núcleo do motor distribuído (banco SQLite, wrappers do Automerge Repo, criptografia, infraestrutura base do Sync Worker) é de código aberto sob licenças permissivas (como MIT ou Apache 2.0). Isso incentiva a comunidade a auditar as implementações de segurança e privacidade.

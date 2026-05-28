@@ -34,7 +34,7 @@ CREATE TABLE edges (
   payload BLOB,                   -- Metadados encriptados (peso, timestamps adicionais, etc.)
   payload_iv BLOB,                -- IV da encriptação do payload
   epoch INTEGER NOT NULL,         -- Índice da época da chave
-  weight REAL DEFAULT 1.0,        -- Valor real em texto plano para ordenação/validação física (ASSETs)
+  active INTEGER DEFAULT 1,       -- Estado da aresta: 1 (Ativa), 0 (Inativa / Lápide)
   created_at INTEGER NOT NULL,    -- Unix timestamp em milissegundos
   signature BLOB,                 -- Assinatura Ed25519 sobre metadados + payload encriptado
   retention_state TEXT NOT NULL DEFAULT 'integral'  -- 'integral' | 'pruned' | 'expunged' | 'orphan'
@@ -60,8 +60,10 @@ O SQLite não oferece suporte a chaves estrangeiras polimórficas que possam apo
   * Letra **`N`**: Indica tabela `nodes`. Ex: `01J2X3Y4Z5N6Y7Z8A9BC...`
   * Letra **`E`**: Indica tabela `edges`. Ex: `01J2X3Y4Z5E6Y7Z8A9BC...`
 
-### 2.2 Peso (`weight`) em Texto Plano
-Campos numéricos críticos para somatórios (como saldos de ativos e volumes de inventário) são gravados em texto plano no campo `weight`. Isso permite que o SQLite calcule agregações rápidas (`SUM(weight)`) sem descriptografar os payloads. Quando privacidade estrita de volume for necessária, `weight` é fixado em `1.0` e a quantidade real é movida para o payload encriptado.
+### 2.2 Estado de Vitalidade (`active`) e Descarte do Somatório Físico
+O campo `active` (anteriormente chamado de `weight`) assume uma semântica puramente de controle de estado e vitalidade de arestas.
+A plataforma **não realiza o somatório de pesos de arestas (`SUM(weight)`)** para calcular saldos ou inventários locais. Como o saldo é representado por um nó físico (`ASSET:BALANCE_STATE`), o saldo vigente é obtido diretamente a partir do payload descriptografado da versão mais recente desse nó (o `head` da linhagem).
+As arestas de movimentação (como `TRANSFERRED_TO`) registram apenas a causalidade e a autoria das transações. Seus volumes financeiros ficam criptografados com segurança dentro de seus payloads individuais, eliminando qualquer vazamento de privacidade na camada de banco de dados plano.
 
 ### 2.3 Ausência de `updated_at`
 Como a plataforma é estritamente append-only, modificações nunca disparam comandos `UPDATE` nas linhas replicáveis. Alterações geram novas linhas com novos `id`s vinculados por arestas `MUTATES` compartilhando o mesmo `entity_id`.
@@ -99,7 +101,7 @@ END;
 ```
 
 ### 3.2 Tabela `active_edges`
-Contém os relacionamentos vigentes do grafo. Arestas revogadas (recebimento de aresta lápide com `weight = 0`) são limpas da tabela pelo trigger, fornecendo um read model limpo do grafo social.
+Contém os relacionamentos vigentes do grafo. Arestas revogadas (recebimento de aresta lápide com `active = 0`) são limpas da tabela pelo trigger, fornecendo um read model limpo do grafo social.
 
 ```sql
 CREATE TABLE active_edges (
@@ -107,13 +109,13 @@ CREATE TABLE active_edges (
   source_id TEXT NOT NULL,
   target_id TEXT NOT NULL,
   type TEXT NOT NULL,
-  weight REAL,
+  active INTEGER,
   created_at INTEGER NOT NULL
 );
 ```
 
 ### 3.3 Tabela `asset_balances`
-Tabela reativa que acumula saldos agregados de ativos baseando-se no somatório de arestas do tipo `TRANSFERRED_TO` e similares.
+Tabela reativa que armazena os saldos consolidados de ativos. Ela é populada e atualizada reativamente na Thread de UI ou pelo Sync Worker sempre que o nó `ASSET:BALANCE_STATE` da linhagem correspondente é descriptografado e atualizado (através de triggers de aplicação sobre a tabela `entity_heads`), eliminando a necessidade de triggers de agregação física baseados em somatórios de arestas.
 
 ### 3.4 Tabela `local_permissions`
 Materializa as permissões atualmente delegadas e válidas para o usuário do dispositivo local, calculadas a partir das arestas de delegação/composição e resoluções de pré-requisitos (`ASSET:PERMISSION` $\rightarrow$ `ASSET:PERMISSION`).

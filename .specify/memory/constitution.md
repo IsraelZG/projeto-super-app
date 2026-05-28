@@ -1,6 +1,6 @@
-# Projeto Superapp — Constituição do Sistema (Plataforma V3.0)
+# Projeto Superapp — Constituição do Sistema (Plataforma V3.1)
 
-Esta constituição estabelece os princípios de arquitetura, padrões de código, regras de design visual e diretivas de segurança não-negociáveis para o desenvolvimento da **Plataforma V3.0 (Local-First & P2P)**. Toda e qualquer alteração de código realizada neste repositório deve se conformar estritamente a estas diretrizes.
+Esta constituição estabelece os princípios de arquitetura, padrões de código, regras de design visual e diretivas de segurança não-negociáveis para o desenvolvimento da **Plataforma V3.1 (Local-First & P2P)**. Toda e qualquer alteração de código realizada neste repositório deve se conformar estritamente a estas diretrizes.
 
 ---
 

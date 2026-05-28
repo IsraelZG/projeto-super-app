@@ -1,6 +1,6 @@
 # 03-set-reconciliation-protocol.md — Range-Based Set Reconciliation Protocol
 
-Este documento especifica o protocolo matemático de reconciliação de dados estruturados do grafo (nós e arestas das tabelas física `nodes` e `edges`) utilizado pela Plataforma V3.0. Este protocolo opera independentemente do Automerge Repo, que gerencia apenas documentos colaborativos.
+Este documento especifica o protocolo matemático de reconciliação de dados estruturados do grafo (nós e arestas das tabelas física `nodes` e `edges`) utilizado pela Plataforma V3.1. Este protocolo opera independentemente do Automerge Repo, que gerencia apenas documentos colaborativos.
 
 ---
 

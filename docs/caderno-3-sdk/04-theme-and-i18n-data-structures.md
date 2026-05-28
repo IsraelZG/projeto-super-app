@@ -1,6 +1,6 @@
 # 04-theme-and-i18n-data-structures.md — Theme & i18n Data Structures
 
-Este documento especifica a estrutura de dados e as propriedades de tematização visual e internacionalização reativa na Plataforma V3.0. Ambas as customizações são tratadas estritamente como **dados no grafo** e não como código.
+Este documento especifica a estrutura de dados e as propriedades de tematização visual e internacionalização reativa na Plataforma V3.1. Ambas as customizações são tratadas estritamente como **dados no grafo** e não como código.
 
 ---
 
