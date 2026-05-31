@@ -20,7 +20,17 @@ A identidade de um usuário humano na Plataforma V3.1 é estruturada em camadas 
 * **Definição**: Identidades operacionais visíveis aos outros peers da rede (ex: Persona Pessoal, Persona Criador, Persona Profissional).
 * **Segurança**: A ligação causal entre a `AUTHENTICATION` primária e a `PERSONA` correspondente tem visibilidade restrita no grafo local do usuário. Outros peers visualizam apenas a `PERSONA` ativa na coluna de layout.
 
-### 1.4 Delegação de Persona Corporativa
+### 1.4 Identidade de Rede (`PeerId`)
+
+Cada `PROFILE:PERSONA` possui um identificador de rede derivado deterministicamente de sua chave pública:
+
+$$\text{PeerId} = \text{blake2s256}(\texttt{PROFILE:PERSONA\_PUB\_KEY})$$
+
+Por ser derivado da chave Ed25519, o `PeerId` é **auto-certificável**: o handshake de conexão exige um desafio-resposta provando posse da chave privada antes de qualquer troca de dados, eliminando *spoofing* de identidades existentes.
+
+> **Fronteira de segurança.** Auto-certificação resolve *spoofing*, não ataques Sybil. A resistência a Sybil é responsabilidade do modelo de acesso por convite / web-of-trust da rede (custo deliberado de criação de identidade), **não** desta derivação de hash.
+
+### 1.5 Delegação de Persona Corporativa
 Em redes corporativas, a empresa (`PROFILE:ORGANIZATION`) pode emitir um `PROFILE:PERSONA` persistente para um cargo (ex: "Gerente Financeiro") e delegar sua operação temporária a um funcionário.
 1. A empresa cria o `PROFILE:PERSONA` do cargo corporativo e emite um `ASSET:ROLE` associado.
 2. A empresa cria uma aresta `DELEGATED_TO` apontando o asset para a chave `PROFILE:AUTHENTICATION` do funcionário.
@@ -87,6 +97,48 @@ Quando um membro ou papel é revogado de um grupo/documento:
 ### 3.4 KMS Online-Optional e Conectividade
 * **Modo Online**: Com conectividade ativa, a rotação de chaves e revogação de UCANs se propagam instantaneamente na rede.
 * **Modo Offline**: Em redes P2P puras ou dispositivos temporariamente isolados, a rotação de chaves é enfileirada localmente e as chaves de nova época são geradas de forma descentralizada e consolidadas de forma assíncrona assim que ocorre a reconexão e reconciliação de estado.
+
+### 3.5 Ordenação Causal, HLC e Seleção de Head
+
+#### 3.5.1 Definição de Head
+O **head** de uma entidade é a **ponta (tip) da linhagem**: o nó-versão do qual nenhuma aresta `MUTATES` ativa parte (ou seja, ninguém mutou a partir dele). **Não** é "o nó de maior `created_at`" — esse critério, baseado em relógio de parede, está sujeito a skew e à manipulação do autor.
+
+Operacionalmente, head = nó-versão de **maior HLC** da entidade. Isso é equivalente à definição estrutural acima **por causa** da invariante de monotonicidade (§3.5.4): se todo filho tem HLC maior que o pai, o nó de maior HLC nunca pode ter um descendente — logo é sempre uma ponta.
+
+#### 3.5.2 Estrutura do HLC
+Cada nó/aresta carrega um carimbo `hlc = (pt, c)`:
+* `pt` — componente físico em ms (colado ao tempo real; serve para display e janelas temporais).
+* `c` — contador lógico (16 bits) que desempata eventos no mesmo `pt`.
+
+Empacotamento: `hlc = (pt << 16) | c`, armazenado como inteiro e **coberto pela assinatura Ed25519**.
+
+#### 3.5.3 Algoritmo de Atualização
+Estado por peer: `L = (pt, c)`.
+
+```
+// Evento local (criar nó-versão / emitir aresta)
+pt_old = pt
+pt = max(pt_old, wall_clock_ms())
+c  = (pt == pt_old) ? c + 1 : 0
+stamp = (pt, c)
+
+// Recepção de carimbo remoto (pt_m, c_m)
+pt_old = pt
+pt = max(pt_old, pt_m, wall_clock_ms())
+if      (pt == pt_old && pt == pt_m) c = max(c, c_m) + 1
+else if (pt == pt_old)               c = c + 1
+else if (pt == pt_m)                 c = c_m + 1
+else                                 c = 0
+```
+
+Ordem total determinística (idêntica em todos os peers, sem coordenação):
+`compare = (a.pt vs b.pt) ?: (a.c vs b.c) ?: (a.author_pubkey vs b.author_pubkey)`.
+
+Garantia: se `e1 → e2` (causal), então `HLC(e1) < HLC(e2)`. A recíproca **não** vale: HLC ordena, mas **não detecta concorrência** — a detecção de fork é estrutural (duas `MUTATES` ativas com o mesmo `source_id`; ver caderno-2/04 §3.2). Dentro de documentos colaborativos, a concorrência granular é resolvida pelo Automerge, não pelo HLC.
+
+#### 3.5.4 Invariantes de Validação na Recepção
+1. **Monotonicidade de pai:** um nó que faz `MUTATES` de um pai `P` é **rejeitado como malformado** se `HLC(filho) ≤ HLC(P)`. Isso impede pós-datar para "voltar no tempo" da linhagem e é o que sustenta a equivalência de §3.5.1.
+2. **Limite de drift:** se `pt_remoto > wall_clock_local + MAX_DRIFT` (ex.: 5 min), o valor **não** é adotado no `max` do relógio local e o nó entra em quarentena até estar na janela. Isso limita o ataque de "HLC futuro-distante" a `MAX_DRIFT`, em vez de poluir o relógio de toda a malha.
 
 ---
 

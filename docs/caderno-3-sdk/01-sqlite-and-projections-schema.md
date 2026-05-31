@@ -18,8 +18,9 @@ CREATE TABLE nodes (
   payload BLOB,                   -- Payload binário encriptado com AES-256-GCM (chave de época)
   payload_iv BLOB,                -- Initialization Vector (IV) do GCM
   epoch INTEGER NOT NULL,         -- Índice da época da chave criptográfica usada
-  created_at INTEGER NOT NULL,    -- Unix timestamp em milissegundos
-  signature BLOB,                 -- Assinatura Ed25519 sobre o ciphertext + metadados
+  created_at INTEGER NOT NULL,    -- Unix timestamp em ms (somente exibição / consulta temporal)
+  hlc INTEGER NOT NULL,           -- Hybrid Logical Clock empacotado: (pt << 16) | c. Chave de ordenação causal.
+  signature BLOB,                 -- Assinatura Ed25519 sobre o ciphertext + metadados + hlc
   retention_state TEXT NOT NULL DEFAULT 'integral'  -- 'integral' | 'pruned' | 'expunged'
 );
 
@@ -35,14 +36,16 @@ CREATE TABLE edges (
   payload_iv BLOB,                -- IV da encriptação do payload
   epoch INTEGER NOT NULL,         -- Índice da época da chave
   active INTEGER DEFAULT 1,       -- Estado da aresta: 1 (Ativa), 0 (Inativa / Lápide)
-  created_at INTEGER NOT NULL,    -- Unix timestamp em milissegundos
-  signature BLOB,                 -- Assinatura Ed25519 sobre metadados + payload encriptado
+  created_at INTEGER NOT NULL,    -- Unix timestamp em ms (somente exibição / consulta temporal)
+  hlc INTEGER NOT NULL,           -- Hybrid Logical Clock empacotado: (pt << 16) | c. Chave de ordenação causal.
+  signature BLOB,                 -- Assinatura Ed25519 sobre metadados + payload encriptado + hlc
   retention_state TEXT NOT NULL DEFAULT 'integral'  -- 'integral' | 'pruned' | 'expunged' | 'orphan'
 );
 
 -- Índices de Performance
 CREATE INDEX idx_nodes_type ON nodes(type);
 CREATE INDEX idx_nodes_pub_key ON nodes(pub_key);
+CREATE INDEX idx_nodes_entity_hlc ON nodes(entity_id, hlc);  -- seleção de head em O(log n)
 CREATE INDEX idx_edges_source ON edges(source_id, type);
 CREATE INDEX idx_edges_target ON edges(target_id, type);
 CREATE INDEX idx_edges_type ON edges(type);
@@ -67,6 +70,7 @@ As arestas de movimentação (como `TRANSFERRED_TO`) registram apenas a causalid
 
 ### 2.3 Ausência de `updated_at`
 Como a plataforma é estritamente append-only, modificações nunca disparam comandos `UPDATE` nas linhas replicáveis. Alterações geram novas linhas com novos `id`s vinculados por arestas `MUTATES` compartilhando o mesmo `entity_id`.
+O `hlc` é atribuído no momento da criação da linha, é imutável e coberto pela assinatura. Ele — e não o `created_at` — é a chave canônica de ordenação causal entre versões e entre linhagens. O `created_at` permanece apenas para exibição e consultas por janela temporal (ex.: Onda 1, "últimos 30 dias").
 
 ---
 
@@ -82,21 +86,27 @@ CREATE TABLE entity_heads (
   entity_id TEXT PRIMARY KEY,
   head_id TEXT NOT NULL,
   type TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
+  head_hlc INTEGER NOT NULL,   -- HLC do head vigente (ordena a linhagem topologicamente)
   FOREIGN KEY (head_id) REFERENCES nodes(id)
 );
 ```
 
 #### Trigger do SQLite para Atualização:
 ```sql
+-- Head = nó-versão de MAIOR HLC da linhagem.
+-- Correto porque a invariante de monotonicidade de pai (caderno-2/02 §3.5) garante
+-- HLC(filho) > HLC(pai). Logo o maior HLC é sempre a ponta (tip) da linhagem; em fork,
+-- é o desempate determinístico até o nó de merge chegar (merge tem HLC > ambos os ramos
+-- e assume a cabeça naturalmente). Como ON CONFLICT mantém o máximo, o resultado independe
+-- da ordem de chegada dos nós no sync P2P.
 CREATE TRIGGER trg_nodes_insert_entity_head
 AFTER INSERT ON nodes
 BEGIN
-  INSERT INTO entity_heads (entity_id, head_id, type, created_at)
-  VALUES (NEW.entity_id, NEW.id, NEW.type, NEW.created_at)
+  INSERT INTO entity_heads (entity_id, head_id, type, head_hlc)
+  VALUES (NEW.entity_id, NEW.id, NEW.type, NEW.hlc)
   ON CONFLICT(entity_id) DO UPDATE SET
-    head_id = CASE WHEN NEW.created_at > excluded.created_at THEN NEW.id ELSE head_id END,
-    created_at = CASE WHEN NEW.created_at > excluded.created_at THEN NEW.created_at ELSE created_at END;
+    head_id  = CASE WHEN NEW.hlc > excluded.head_hlc THEN NEW.id  ELSE head_id  END,
+    head_hlc = CASE WHEN NEW.hlc > excluded.head_hlc THEN NEW.hlc ELSE head_hlc END;
 END;
 ```
 

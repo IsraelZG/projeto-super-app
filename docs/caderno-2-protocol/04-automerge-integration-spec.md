@@ -17,20 +17,35 @@ A plataforma opera sob duas trilhas de dados complementares para edição colabo
 
 ---
 
-## 2. O Ciclo de Commit Colaborativo
+## 2. Documentos Casca (Shell Documents / Rendezvous)
+
+A formação do swarm WebRTC entre co-editores é orquestrada pelo Automerge Repo por meio de **Documentos Casca** — salas de encontro efêmeras em RAM, sem histórico CRDT. O identificador da sala é derivado de um segredo de capability, não de IDs previsíveis (que permitiriam a qualquer um adivinhar a sala e vazar metadados de interesse):
+
+$$\text{RendezvousId} = \text{SHA-256}(\texttt{rendezvous\_secret} \mathbin{\Vert} \texttt{ASSET:PERMISSION\_ID})$$
+
+O `rendezvous_secret` é distribuído exclusivamente a quem possui o UCAN correspondente. Conhecer o `PERMISSION_ID` sozinho não é suficiente para entrar na sala. Ao se conectar ao hash derivado, o Automerge Repo forja túneis WebRTC/WebSocket multiplexados entre os interessados daquele escopo.
+
+Documentos Casca são usados para:
+- Propagação em tempo real de `Changes` (micro-edições) entre co-editores antes do commit (§3.1).
+- Coordenação de committer e co-assinatura via Ephemeral Messages (§4.1).
+- **Não** são usados para persistência de grafo — esse papel pertence exclusivamente às tabelas `nodes` e `edges`.
+
+---
+
+## 3. O Ciclo de Commit Colaborativo
 
 As edições granulares realizadas na UI pelos usuários alimentam o Automerge Repo em tempo real. O Sync Worker orquestra o ciclo de vida dessas edições por meio do seguinte fluxo:
 
-### 2.1 Captura de Changes (Escrita em Staging)
+### 3.1 Captura de Changes (Escrita em Staging)
 * As alterações em tempo real são salvas na tabela local não-replicada `pending_changes` no SQLite.
 * O Automerge Repo propaga essas alterações como **ephemeral messages** via canais WebRTC na RAM para todos os peers co-editores conectados ao documento. Isso garante feedback visual instantâneo e colaboração em tempo real (digitação simultânea) sem inflar a tabela física central `nodes` com micro-versões.
 
-### 2.2 Gatilho de Commit
+### 3.2 Gatilho de Commit
 O Sync Worker monitora o acúmulo de Changes em `pending_changes`. O gatilho de consolidação é disparado sob duas heurísticas configuráveis pela `SPECIFICATION` do documento:
 * **Inatividade**: Ex. 3 segundos consecutivos sem novas alterações locais ou de peers co-editores.
 * **Limiar de Operações**: Ex. acúmulo de 100 micro-changes pendentes.
 
-### 2.3 Consolidação e Emissão de Nó-Versão
+### 3.3 Consolidação e Emissão de Nó-Versão
 Disparado o gatilho:
 1. O Sync Worker designa ou atua como o **Committer** do ciclo.
 2. Compila as Changes pendentes e gera o snapshot binário consolidado (`Automerge.save(doc)`).
@@ -41,7 +56,7 @@ Disparado o gatilho:
 
 ---
 
-## 3. Modos de Eleição de Committer
+## 4. Modos de Eleição de Committer
 
 Para evitar conflitos de concorrência e a criação desnecessária de bifurcações (branches) na Linhagem de Versões do grafo ao consolidar edições de múltiplos co-editores ativos ao mesmo tempo, a `SPECIFICATION` do documento declara um entre quatro modos de eleição do **Committer**:
 
@@ -52,5 +67,14 @@ Para evitar conflitos de concorrência e a criação desnecessária de bifurcaç
 | **`deterministic`** | Um algoritmo determinístico (ex: peer com o menor `entity_id` lexicográfico ativo no ciclo corrente) é eleito Committer por todos sem mensagens de coordenação. | Colaboração densa P2P sem dependência de conexões de super peers. |
 | **`manual`** | O Committer é designado explicitamente por um peer que possua permissão (`ASSET:PERMISSION`) de governança ativa sobre o nó. | Quadros e documentos de governança restrita. |
 
-### 3.1 Co-assinatura via Ephemeral Messages
-Caso a `SPECIFICATION` exija aprovação/assinatura conjunta de múltiplos co-editores antes de publicar a nova versão, o Committer proposto envia o hash do snapshot binário como mensagem efêmera na RAM (via WebRTC) para os peers legítimos. Estes respondem com suas assinaturas Ed25519. O Committer reúne as assinaturas e as persiste no nó final na tabela `nodes`. Nenhuma mensagem de coordenação é gravada permanentemente no grafo. reúne as assinaturas e as persiste no nó final na tabela `nodes`. Nenhuma mensagem de coordenação é gravada permanentemente no grafo.
+### 4.1 Co-assinatura via Ephemeral Messages
+Caso a `SPECIFICATION` exija aprovação/assinatura conjunta de múltiplos co-editores antes de publicar a nova versão, o Committer proposto envia o hash do snapshot binário como mensagem efêmera na RAM (via WebRTC) para os peers legítimos. Estes respondem com suas assinaturas Ed25519. O Committer reúne as assinaturas e as persiste no nó final na tabela `nodes`. Nenhuma mensagem de coordenação é gravada permanentemente no grafo.
+
+### 4.2 Resolução de Fork na Linhagem
+
+Em produção espera-se o uso de um Committer árbitro — **preferencialmente um `PROFILE:SYSTEM`** — que serializa as edições e previne forks. Esta subseção trata a exceção esperada como rara (P2P puro sem agente de sistema, ou partição de rede): duas arestas `MUTATES` apontando para o mesmo nó-pai.
+
+1. **Detecção (estrutural):** há fork quando existem duas (ou mais) arestas `MUTATES` ativas com o mesmo `source_id`, nenhuma ancestral da outra. O HLC ordena, mas **não** detecta concorrência — por isso a detecção é estrutural.
+2. **Eleição do mergeador:** o merge herda a **mesma** eleição determinística de Committer da §4 (preferência por `PROFILE:SYSTEM`; na ausência, o peer determinístico, ex.: menor `entity_id` ativo no ciclo). Isso impede que dois peers criem merges concorrentes (um "fork do merge").
+3. **Merge:** o mergeador resolve conflitos — via Automerge para `CONTENT:DOCUMENT`; via regra da `SPECIFICATION` para os demais tipos — e cria um novo nó-versão com **duas** arestas `MUTATES` (uma de cada ponta do fork), com `hlc` estritamente superior a ambos os ramos. Assina (Ed25519) e propaga.
+4. **Convergência:** como o nó de merge tem `hlc` maior que os dois ramos, ele assume a cabeça naturalmente na projeção `entity_heads` (caderno-3/01 §3.1). Enquanto o merge não chega, o head exibido é o ramo de maior `hlc` (desempate determinístico e idêntico em todos os peers).

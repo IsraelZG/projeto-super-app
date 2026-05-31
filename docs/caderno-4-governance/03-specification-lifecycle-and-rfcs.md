@@ -56,3 +56,14 @@ Toda rede possui um nó debootstrap do tipo **`SPECIFICATION:NETWORK_GOVERNANCE`
 ### 3.3 Morte da Rede por Leis da Física
 Diferente de sistemas tradicionais, a plataforma **não necessita de código específico para desativar ou congelar redes** (ex: falecimento ou sumiço do fundador sem sucessor).
 * **Paralisia Natural**: Se os validadores autorizados ficam permanentemente offline, as transações não-comutativas (transferências de saldo, decremento de estoque) falham na validação por falta de assinaturas legítimas. A rede entra em estado read-only por leis físicas de design. As interações comutativas (chats, edições de rascunhos) continuam operando normalmente entre os peers ativos.
+
+### 3.4 Tradeoff de Liveness dos Validadores (Formalização)
+
+O comportamento da §3.3 é **intencional e defensável** — documentado como propriedade, não tratado como defeito a mitigar.
+
+* ✅ **Operações comutativas** (leitura, gossip, RBSR, navegação, chats, rascunhos): funcionam **independentemente** de validadores. A rede nunca perde a capacidade de ler e disseminar dados.
+* ⚠️ **Operações não-comutativas transacionais** (commits governados, transferências de `ASSET`): exigem ao menos **1 validador ativo** dentre o conjunto **K-de-N**. Se todos desaparecerem, a parte transacional torna-se **read-only** até que (a) um validador retorne, ou (b) novos validadores sejam eleitos por **consenso de emergência** — ex.: acordo de **2/3** dos peers com `PROFILE:AUTHENTICATION` ativo. A contagem é amparada pelo modelo de acesso por convite / web-of-trust, que a torna não-trivialmente inflável por Sybil.
+* 🔒 **Segurança:** a degradação para read-only **não corrompe dados, não permite operações inválidas e não perde auditabilidade**. É um *freeze*, não um *crash*.
+* 📐 **Projetado para:** redes onde auditabilidade e integridade importam mais que disponibilidade transacional de 100% em cenário de desastre (corporativas, financeiras, reguladas).
+
+**Esclarecimento sobre o "SPOF":** validadores **não** são uma unidade singular. A arquitetura especifica um conjunto K-de-N de entidades independentes (Super Peers, Cloud, Desktops de alta disponibilidade). A liveness exige apenas **1** online, não todos. O cenário de extinção total dos validadores é, por definição, a morte natural da rede já prevista nesta seção.

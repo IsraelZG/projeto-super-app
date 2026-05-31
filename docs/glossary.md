@@ -28,6 +28,8 @@ Este documento centraliza a definição de termos e primitivas arquiteturais da 
 
 **id** — Identificador ULID único de uma versão específica de um nó.
 
+**HLC (Hybrid Logical Clock)** — Carimbo `(pt, c)` (componente físico em ms + contador lógico) que respeita a relação happens-before e permanece colado ao tempo real. Empacotado como `(pt << 16) | c` e coberto pela assinatura Ed25519. É a chave canônica de ordenação causal entre versões e entre linhagens, substituindo `created_at` na seleção de head. Ver caderno-2/02 §3.5.
+
 **Linhagem de Versões (Version Lineage)** — Conjunto de todas as versões de uma entidade (mesmo `entity_id`), encadeadas por arestas `MUTATES`. É a auditoria universal do sistema, estruturada em duas camadas de imutabilidade: a do registro (via assinaturas Ed25519) e a da ordem de transição (via `previous_hash` gravado na aresta `MUTATES` apontando para a assinatura do elo anterior).
 
 **Local-First** — Paradigma onde dados nascem e vivem no dispositivo do usuário; sincronização é secundária e oportunística.
@@ -41,6 +43,8 @@ Este documento centraliza a definição de termos e primitivas arquiteturais da 
 **Peer** — Instância individual da plataforma, independente do formato (Cloud, Web, Desktop, Mobile).
 
 **Peer do Sistema** — Peer especial operado pelo fundador da rede, com função de bootstrap, signaling e snapshot.
+
+**RangeFooter** — Rodapé `{count, checksum}` anexado ao fechamento de cada range no protocolo de Set Reconciliation, tornando colisão/omissão adversarial de fingerprint detectável de forma determinística. Ver caderno-2/03 §1.2.
 
 **PERSONA** — Subtipo de PROFILE que serve como máscara pública operacional do humano.
 
@@ -89,3 +93,33 @@ Este documento centraliza a definição de termos e primitivas arquiteturais da 
 **CONTENT:INTENT** — Subtipo de CONTENT que materializa a intenção de uma ação que exige validação não-trivial.
 
 **CONTENT:MESSAGE** — Subtipo de CONTENT usado para toda comunicação interna de infraestrutura (como `SYSTEM_QUERY` ou `SYSTEM_RESPONSE`) e notificações entre agentes do sistema, operando de modo offline-first.
+
+---
+
+**Anti-Entropy O(1)** — Fase inicial de cada sessão de sincronização (Onda 0) na qual os dois peers trocam apenas o root fingerprint do seu range autorizado. Se os fingerprints coincidem, a sessão encerra sem transferência de dados. Custo de $O(1)$ assumindo malha quente; *cold start* (DHT + NAT + handshake) tem custo de segundos. Ver caderno-2/03 §4.
+
+**ConnectionPromotionEngine** — Componente do Sync Worker que, em background, tenta converter conexões relay em conexões P2P diretas via hole punching STUN. A promoção ocorre apenas quando o NAT permite (cone restrito ou completo); em NAT simétrico, o relay permanece e isso é comportamento esperado, não falha. Ver RFC de Transporte §2.5.1.
+
+**Consistent Hashing** — Algoritmo de mapeamento determinístico de `chunkId` em um anel de peers, usado para eleger os custodiantes responsáveis por cada fragmento de dado. Base do `replication factor` em P2P Puro e do sharding na modalidade Pública. Ver caderno-2/03 §3.3.
+
+**Crypto Worker** — Web worker dedicado à validação de assinaturas Ed25519 em lote (Ondas 1/2) e à decifração de payloads AES-256-GCM. Hospeda o Key Vault com TTL de 4 h em RAM. Opera fora da Main Thread para não bloquear a UI.
+
+**Documento Casca (Shell Document / Rendezvous)** — Sala de encontro efêmera em RAM, sem histórico CRDT, usada pelo Automerge Repo para orquestrar a formação do swarm WebRTC entre co-editores. O `RendezvousId` é derivado de um segredo de capability (`SHA-256(rendezvous_secret ‖ ASSET:PERMISSION_ID)`), impedindo enumeração. Ver caderno-2/04 §2.
+
+**Index Worker** — Web worker dedicado à reconstrução de projeções locais (FTS5, R*Tree) a partir de payloads decifrados pelo Crypto Worker. Opera fora da Main Thread para não bloquear a UI.
+
+**Onda (Wave)** — Fase do pipeline de sincronização. A sequência canônica tem quatro ondas: 0 (anti-entropy, root fingerprint apenas), 1 (cabeçalhos críticos e tela ativa), 2 (B-Tree completa em estado podado), 3 (reidratação lazy de BLOBs via WebTorrent). Ver caderno-2/03 §4.
+
+**PeerId** — Identificador de rede derivado deterministicamente da chave pública de uma `PROFILE:PERSONA`: `blake2s256(PROFILE:PERSONA_PUB_KEY)`. Auto-certificável (impede *spoofing* via desafio-resposta no handshake), mas não confere resistência a Sybil por si só — essa é responsabilidade do modelo de acesso por convite. Ver caderno-2/02 §1.4.
+
+**Poda Segura** — Protocolo de três camadas para transição `integral → pruned` sem risco de perda de dados: (1) jitter aleatório de 30–300 s com reverificação de custodiantes, (2) handshake `RELEASE/ACK` com o próximo peer no anel de consistent hashing, (3) health-check dos $N-1$ peers antes de efetivar a poda. Ver RFC de Transporte §4.3.
+
+**RBSR (Range-Based Set Reconciliation)** — Protocolo de sincronização de conjuntos por XOR recursivo de ranges ordenados da B-Tree. Compara apenas fingerprints até isolar elementos divergentes, evitando transferência de bancos inteiros. Fundamento matemático em caderno-2/03 §1.
+
+**RelayTrustModel** — Sistema de score local e não-transitivo de relays WebRTC mantido pelo `SwarmRegistry`. Peers com desempenho suspeito (alta latência, pacotes descartados) recebem shadowban silencioso por histerese de janela deslizante. O score **não** é propagado como fato para outros peers, evitando badmouthing. Ver RFC de Transporte §2.5.2.
+
+**STALE_EPOCH** — Sinal de erro que interrompe o RBSR quando o índice de época criptográfica de um peer difere do remoto durante a transferência. Força o catch-up de identidades (nova chave de época) antes de retomar o sync de dados de domínio. Ver RFC de Transporte §2.9.
+
+**SwarmRegistry** — Mapa em RAM mantido pelo Sync Worker com peers ativos e seus metadados: latência, tier de capacidade, score de relay e estado de promoção de conexão. Fonte para decisões de roteamento, shadowban e eleição oportunística de líder de sync. Ver RFC de Transporte §3.2.2.
+
+**Sync Worker** — Web worker principal da camada de transporte. Orquestra o Automerge Repo, mantém o loop de RBSR, gerencia o `SwarmRegistry`, executa transações no SQLite WASM (OPFS) e coordena os demais workers (Crypto, Index). Opera fora da Main Thread via Comlink. Ver RFC de Transporte §3.1.
